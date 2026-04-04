@@ -1,14 +1,25 @@
-.PHONY: setup run dev clean check-gpu setup-backend setup-frontend
+.PHONY: setup run dev clean clean-all check-gpu setup-backend setup-frontend setup-dirs
 
-setup: setup-backend setup-frontend
-	@echo "Setup complete. Run 'make run' to start."
+setup: setup-dirs setup-backend setup-frontend
+	@echo ""
+	@echo "Setup complete."
+	@echo "  Run 'make check-gpu' to verify GPU compatibility."
+	@echo "  Run 'make run' to start the application."
+
+setup-dirs:
+	@mkdir -p data/captures data/predictions data/reports data/cache
+	@echo "Data directories created."
 
 setup-backend:
 	cd backend && python -m venv .venv && \
 	. .venv/bin/activate && \
 	pip install -r requirements.txt && \
 	playwright install chromium
+	@echo ""
 	@echo "Backend setup complete."
+	@echo "NOTE: TRIBE v2 must be installed separately:"
+	@echo "  git clone https://github.com/facebookresearch/tribev2.git"
+	@echo "  cd tribev2 && pip install -e ."
 
 setup-frontend:
 	cd frontend && npm install
@@ -36,4 +47,4 @@ clean-all: clean
 	@echo "Cleaned all data including model cache."
 
 check-gpu:
-	cd backend && . .venv/bin/activate && python ../scripts/check_gpu.py
+	@cd backend && . .venv/bin/activate && python ../scripts/check_gpu.py

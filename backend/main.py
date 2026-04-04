@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -8,23 +10,67 @@ from api.jobs import router as jobs_router
 from api.stream import router as stream_router
 from config import settings
 from database import init_db, reconcile_stale_jobs
+from pipeline.model_manager import GPUInfo, ModelManager
 from worker import worker_loop
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+def _log_gpu_info() -> None:
+    gpu = GPUInfo.detect()
+    if not gpu.available:
+        logger.warning(
+            "No CUDA GPU detected — TRIBE v2 inference will not be available. "
+            "Install an NVIDIA GPU with 16GB+ VRAM for brain analysis."
+        )
+        return
+    for dev in gpu.devices:
+        status = "OK" if dev["sufficient"] else "INSUFFICIENT"
+        logger.info(
+            "GPU %d: %s — %.1f GB VRAM [%s]",
+            dev["index"],
+            dev["name"],
+            dev["total_vram_gb"],
+            status,
+        )
+
+
+async def _warm_up_model() -> None:
+    """Load TRIBE v2 model eagerly on startup (off the event loop)."""
+    mgr = ModelManager.get()
+    await asyncio.to_thread(mgr.load_model)
+    if mgr.is_loaded:
+        await asyncio.to_thread(mgr.warm_up)
+    else:
+        logger.warning(
+            "TRIBE v2 model not loaded — inference disabled. Reason: %s",
+            mgr.error or "unknown",
+        )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     await reconcile_stale_jobs()
-    stop = __import__("asyncio").Event()
-    task = __import__("asyncio").create_task(worker_loop(stop))
+
+    _log_gpu_info()
+    await _warm_up_model()
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(worker_loop(stop))
     app.state.worker_stop = stop
     app.state.worker_task = task
+    app.state.model_manager = ModelManager.get()
     yield
     stop.set()
     task.cancel()
     try:
         await task
-    except __import__("asyncio").CancelledError:
+    except asyncio.CancelledError:
         pass
 
 
@@ -38,6 +84,12 @@ app.add_middleware(
 )
 app.include_router(jobs_router)
 app.include_router(stream_router)
+
+
+@app.get("/health")
+async def health():
+    mgr = ModelManager.get()
+    return mgr.health()
 
 
 def main() -> None:

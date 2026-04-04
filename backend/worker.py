@@ -1,6 +1,6 @@
 import asyncio
 import json
-import uuid
+import logging
 from datetime import datetime, timezone
 
 from config import settings
@@ -8,6 +8,8 @@ from database import get_db
 from models.job import JobStatus
 from pipeline.capture import capture_website
 from pipeline.url_validator import validate_url
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now() -> str:
@@ -77,14 +79,56 @@ async def _get_job_url(job_id: str) -> str | None:
         return str(row["url"])
 
 
+def _run_inference_sync(job_id: str) -> dict:
+    """Run TRIBE v2 inference in a thread-safe manner (called via asyncio.to_thread)."""
+    from pipeline.inference import run_inference
+
+    return run_inference(job_id)
+
+
+def _friendly_error(stage: str, exc: Exception) -> str:
+    """Map common exceptions to user-facing messages."""
+    msg = str(exc)
+
+    if stage == "analyzing":
+        if "CUDA out of memory" in msg or "OutOfMemoryError" in msg:
+            return (
+                "Not enough GPU memory for analysis. "
+                "TRIBE v2 needs ~16GB VRAM. Check your GPU with `make check-gpu`."
+            )
+        if "tribev2" in msg.lower() or "TribeModel" in msg:
+            return (
+                "Brain analysis failed. Ensure TRIBE v2 is installed: "
+                "clone https://github.com/facebookresearch/tribev2 and run `pip install -e .`"
+            )
+        if "HF_TOKEN" in msg or "HuggingFace" in msg:
+            return (
+                "HuggingFace token missing or invalid. "
+                "Add HF_TOKEN to your .env file. "
+                "Get one at https://huggingface.co/settings/tokens"
+            )
+        if "not loaded" in msg.lower():
+            return (
+                "TRIBE v2 model not loaded. Run `make setup` to download the model, "
+                "or check GPU availability with `make check-gpu`."
+            )
+        if "not found" in msg.lower() or "FileNotFoundError" in type(exc).__name__:
+            return f"Capture artifacts missing — the capture may have failed: {msg}"
+
+    return msg
+
+
 async def _process_job(job_id: str) -> None:
     url_row = await _get_job_url(job_id)
     if url_row is None:
         return
     url = url_row
     try:
+        # Stage 1: URL validation
         await _update_job(job_id, JobStatus.validating, None, None)
         validated = await asyncio.to_thread(validate_url, url)
+
+        # Stage 2: Website capture (Playwright)
         await _update_job(job_id, JobStatus.capturing, None, None)
         cap_cfg = {
             "data_dir": settings.DATA_DIR,
@@ -99,11 +143,34 @@ async def _process_job(job_id: str) -> None:
         artifacts = await capture_website(job_id, validated, cap_cfg)
         await _update_job(
             job_id,
-            JobStatus.ready,
+            JobStatus.capturing,
             None,
             None,
             capture_metadata=artifacts,
         )
+
+        # Stage 3: TRIBE v2 brain analysis (GPU inference)
+        await _update_job(job_id, JobStatus.analyzing, None, None)
+        logger.info("Starting TRIBE v2 inference for job %s", job_id)
+        inference_meta = await asyncio.to_thread(_run_inference_sync, job_id)
+        logger.info(
+            "TRIBE v2 inference complete for job %s — %d timesteps",
+            job_id,
+            inference_meta.get("n_timesteps", 0),
+        )
+
+        # Stage 4: Done (scoring will be Phase 3)
+        await _update_job(
+            job_id,
+            JobStatus.ready,
+            None,
+            None,
+            capture_metadata={
+                **(artifacts or {}),
+                "inference": inference_meta,
+            },
+        )
+
     except Exception as e:
         stage = JobStatus.validating
         async with get_db() as db:
@@ -117,11 +184,14 @@ async def _process_job(job_id: str) -> None:
                     stage = JobStatus(str(row["status"]))
                 except ValueError:
                     stage = JobStatus.validating
+
+        friendly = _friendly_error(stage.value, e)
+        logger.error("Job %s failed at %s: %s", job_id, stage.value, e, exc_info=True)
         await _update_job(
             job_id,
             JobStatus.failed,
             failed_stage=stage.value,
-            error_message=str(e),
+            error_message=friendly,
         )
 
 
