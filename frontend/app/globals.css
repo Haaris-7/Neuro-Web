@@ -1,0 +1,77 @@
+@import "tailwindcss";
+
+:root {
+  --background: #0a0e1a;
+  --foreground: #e2e8f0;
+  --neuro-surface: #111827;
+  --neuro-border: #1e293b;
+  --accent-cyan: #22d3ee;
+  --accent-violet: #8b5cf6;
+  --accent-blue: #3b82f6;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-neuro-bg: #0a0e1a;
+  --color-neuro-surface: #111827;
+  --color-neuro-border: #1e293b;
+  --color-accent-cyan: #22d3ee;
+  --color-accent-violet: #8b5cf6;
+  --color-accent-blue: #3b82f6;
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+
+@keyframes neuro-glow {
+  0%,
+  100% {
+    box-shadow:
+      0 0 20px rgb(34 211 238 / 0.25),
+      0 0 40px rgb(139 92 246 / 0.15);
+  }
+  50% {
+    box-shadow:
+      0 0 28px rgb(139 92 246 / 0.35),
+      0 0 56px rgb(59 130 246 / 0.2);
+  }
+}
+
+@keyframes neuro-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes neuro-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-neuro-glow {
+  animation: neuro-glow 2.5s ease-in-out infinite;
+}
+
+.animate-neuro-spin {
+  animation: neuro-spin 0.9s linear infinite;
+}
+
+.animate-neuro-fade-in {
+  animation: neuro-fade-in 0.4s ease-out forwards;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+}
+
+*:focus-visible {
+  outline: 2px solid rgb(34 211 238 / 0.6);
+  outline-offset: 2px;
+}
