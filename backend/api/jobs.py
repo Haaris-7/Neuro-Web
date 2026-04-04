@@ -82,6 +82,29 @@ async def get_job_by_id(job_id: str) -> JobResponse:
     return await _row_to_response(row)
 
 
+@router.get("/{job_id}/report")
+async def get_job_report(job_id: str) -> dict:
+    """Return the compiled analysis report for a completed job."""
+    from engine.report import load_report
+
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT status FROM jobs WHERE id = ?", (job_id,)
+        )
+        row = await cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if str(row["status"]) != JobStatus.ready.value:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Job is not ready (status: {row['status']})",
+        )
+    report = await asyncio.to_thread(load_report, job_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return report
+
+
 @router.delete("/{job_id}", status_code=204)
 async def delete_job(job_id: str) -> None:
     async with get_db() as db:
@@ -90,10 +113,11 @@ async def delete_job(job_id: str) -> None:
     if cur.rowcount == 0:
         raise HTTPException(status_code=404, detail="Job not found")
     data_root = Path(settings.DATA_DIR).resolve()
-    cap = (data_root / "captures" / job_id).resolve()
-    try:
-        cap.relative_to(data_root)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid path") from None
-    if cap.exists():
-        shutil.rmtree(cap, ignore_errors=True)
+    for subdir in ("captures", "predictions", "reports"):
+        target = (data_root / subdir / job_id).resolve()
+        try:
+            target.relative_to(data_root)
+        except ValueError:
+            continue
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)

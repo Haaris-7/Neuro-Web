@@ -86,6 +86,45 @@ def _run_inference_sync(job_id: str) -> dict:
     return run_inference(job_id)
 
 
+def _run_scoring_sync(job_id: str, url: str, inference_meta: dict) -> dict:
+    """Run deterministic core engine scoring (called via asyncio.to_thread)."""
+    import json
+    from pathlib import Path
+
+    import numpy as np
+
+    from engine.report import compile_report
+
+    preds_path = Path(inference_meta["combined_preds_path"])
+    preds_data = np.load(str(preds_path))
+    predictions = preds_data["preds"]
+
+    segment_alignment = inference_meta.get("segment_alignment", [])
+
+    capture_dir = Path(settings.DATA_DIR) / "captures" / job_id
+
+    report = compile_report(
+        job_id=job_id,
+        url=url,
+        predictions=predictions,
+        segment_alignment=segment_alignment,
+        capture_dir=str(capture_dir),
+        viewport_height=settings.CAPTURE_VIEWPORT_H,
+    )
+
+    return {
+        "attention_score": report.scores.attention_score,
+        "emotion_score": report.scores.emotion_score,
+        "impact_score": report.scores.impact_score,
+        "temporal_variance": report.scores.temporal_variance,
+        "dark_pattern_score": report.dark_patterns.score,
+        "dark_pattern_count": len(report.dark_patterns.patterns),
+        "timeline_peaks": len(report.timeline.peaks),
+        "overlay_elements": len(report.overlay),
+        "report_path": str(Path(settings.DATA_DIR) / "reports" / job_id / "report.json"),
+    }
+
+
 def _friendly_error(stage: str, exc: Exception) -> str:
     """Map common exceptions to user-facing messages."""
     msg = str(exc)
@@ -114,6 +153,19 @@ def _friendly_error(stage: str, exc: Exception) -> str:
             )
         if "not found" in msg.lower() or "FileNotFoundError" in type(exc).__name__:
             return f"Capture artifacts missing — the capture may have failed: {msg}"
+
+    if stage == "scoring":
+        if "atlas" in msg.lower() or "nibabel" in msg.lower() or "nilearn" in msg.lower():
+            return (
+                "Brain region atlas could not be loaded. "
+                "Ensure nibabel and nilearn are installed: pip install nibabel nilearn"
+            )
+        if "predictions" in msg.lower() or "shape" in msg.lower():
+            return (
+                "Analysis produced unexpected results. "
+                "This may be a TRIBE v2 compatibility issue."
+            )
+        return f"Scoring engine failed: {msg}"
 
     return msg
 
@@ -159,7 +211,20 @@ async def _process_job(job_id: str) -> None:
             inference_meta.get("n_timesteps", 0),
         )
 
-        # Stage 4: Done (scoring will be Phase 3)
+        # Stage 4: Core engine scoring (deterministic)
+        await _update_job(job_id, JobStatus.scoring, None, None)
+        logger.info("Starting core engine scoring for job %s", job_id)
+        scoring_meta = await asyncio.to_thread(
+            _run_scoring_sync, job_id, url, inference_meta
+        )
+        logger.info(
+            "Scoring complete for job %s — impact=%.1f, dark_patterns=%d",
+            job_id,
+            scoring_meta.get("impact_score", 0),
+            scoring_meta.get("dark_pattern_count", 0),
+        )
+
+        # Stage 5: Done
         await _update_job(
             job_id,
             JobStatus.ready,
@@ -168,6 +233,7 @@ async def _process_job(job_id: str) -> None:
             capture_metadata={
                 **(artifacts or {}),
                 "inference": inference_meta,
+                "scoring": scoring_meta,
             },
         )
 
