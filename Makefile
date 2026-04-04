@@ -1,10 +1,13 @@
-.PHONY: setup run dev clean clean-all check-gpu setup-backend setup-frontend setup-dirs
+.PHONY: setup setup-interactive run dev clean clean-all check-gpu setup-backend setup-frontend setup-dirs
 
 setup: setup-dirs setup-backend setup-frontend
 	@echo ""
 	@echo "Setup complete."
 	@echo "  Run 'make check-gpu' to verify GPU compatibility."
 	@echo "  Run 'make run' to start the application."
+
+setup-interactive:
+	@bash scripts/setup.sh
 
 setup-dirs:
 	@mkdir -p data/captures data/predictions data/reports data/cache
