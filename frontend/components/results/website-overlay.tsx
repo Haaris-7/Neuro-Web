@@ -114,6 +114,13 @@ export function WebsiteOverlay({
   const scale = imgWidth ? imgWidth / viewportWidth : 1;
   const hue = CHANNELS.find((c) => c.key === channel)?.hue ?? 200;
   const anchored = useMemo(() => darkPatterns.filter((dp) => dp.bbox), [darkPatterns]);
+  const regionsLargestFirst = useMemo(
+    () =>
+      [...overlay].sort(
+        (a, b) => b.bbox.width * b.bbox.height - a.bbox.width * a.bbox.height,
+      ),
+    [overlay],
+  );
 
   return (
     <div className="flex h-full flex-col gap-4">
@@ -182,7 +189,7 @@ export function WebsiteOverlay({
               />
               {imgWidth > 0 && (
                 <div className="absolute inset-0" style={{ opacity }}>
-                  {overlay.map((el, i) => (
+                  {regionsLargestFirst.map((el, i) => (
                     <OverlayRegion
                       key={i}
                       el={el}

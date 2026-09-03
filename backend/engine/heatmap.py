@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 VERTEX_ACTIVATION_FILE = "vertex_activation.u8"
 VERTEX_ACTIVATION_META_FILE = "vertex_activation.json"
 PERCENTILE_RANGE = (2.0, 98.0)
+BACKGROUND = "#060a14"
 
 
 def normalize_vertex_map(values: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
@@ -75,6 +76,7 @@ def generate_2d_projections(
         return {}
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    plt.style.use("dark_background")
     fsaverage = datasets.fetch_surf_fsaverage(mesh="fsaverage5")
     half = activations.shape[0] // 2
     hemi_data = {"left": activations[:half], "right": activations[half:]}
@@ -103,7 +105,10 @@ def generate_2d_projections(
                 title=name.replace("_", " ").title(),
             )
             target = output_dir / f"{name}.png"
-            fig.savefig(str(target), dpi=120, bbox_inches="tight", facecolor="#060a14")
+            fig.patch.set_facecolor(BACKGROUND)
+            for ax in fig.axes:
+                ax.set_facecolor(BACKGROUND)
+            fig.savefig(str(target), dpi=120, bbox_inches="tight", facecolor=BACKGROUND)
             plt.close(fig)
             paths[name] = f"{output_dir.name}/{target.name}"
         except Exception:
