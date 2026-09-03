@@ -1,326 +1,405 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { OrbitControls, useGLTF, Html } from "@react-three/drei";
+import { Canvas, useThree, type ThreeEvent } from "@react-three/fiber";
+import { OrbitControls, useGLTF } from "@react-three/drei";
 import * as THREE from "three";
 import { buildLUT, valueToColor, type ColormapName } from "@/lib/colormaps";
 import { ColorLegend } from "./color-legend";
-import type { RegionBreakdown, FunctionalGroup } from "@/lib/types";
+import {
+  GROUP_COLORS,
+  GROUP_LABELS,
+  type AtlasData,
+  type FunctionalGroup,
+  type RegionBreakdown,
+  type VertexActivationMeta,
+} from "@/lib/types";
 
 interface BrainHeatmapProps {
   meshUrl: string;
+  activationUrl: string;
+  activationMeta: VertexActivationMeta;
+  atlas: AtlasData | null;
   regionBreakdown: RegionBreakdown[];
-  atlasData?: AtlasData | null;
+  timeLabels: number[];
   colormap?: ColormapName;
 }
 
-interface AtlasData {
-  vertex_labels: number[];
-  region_names: string[];
-  functional_groups: Record<string, FunctionalGroup>;
-}
+type ViewMode = "all" | FunctionalGroup;
 
-type ViewMode = "combined" | "attention" | "emotion";
-
-const VIEW_MODES: { key: ViewMode; label: string; groups: FunctionalGroup[] }[] = [
-  {
-    key: "combined",
-    label: "Combined",
-    groups: ["visual", "attention", "emotional", "language", "default_mode"],
-  },
-  { key: "attention", label: "Attention", groups: ["visual", "attention"] },
-  { key: "emotion", label: "Emotion", groups: ["emotional"] },
+const VIEW_MODES: { key: ViewMode; label: string }[] = [
+  { key: "all", label: "All cortex" },
+  { key: "visual", label: "Visual" },
+  { key: "attention", label: "Attention" },
+  { key: "emotional", label: "Emotional" },
+  { key: "language", label: "Language" },
+  { key: "default_mode", label: "Default mode" },
 ];
 
-function buildVertexColors(
-  vertexCount: number,
-  atlasData: AtlasData | null,
-  regionBreakdown: RegionBreakdown[],
-  viewMode: ViewMode,
-  colormap: ColormapName,
-): Float32Array {
-  const colors = new Float32Array(vertexCount * 3);
-  const lut = buildLUT(colormap);
-  const mode = VIEW_MODES.find((m) => m.key === viewMode)!;
+const DIMMED = new THREE.Color("#1a2233");
+const MEDIAL_WALL = new THREE.Color("#0f1522");
 
-  if (!atlasData) {
-    for (let i = 0; i < vertexCount; i++) {
-      const [r, g, b] = valueToColor(0.3, lut);
-      colors[i * 3] = r;
-      colors[i * 3 + 1] = g;
-      colors[i * 3 + 2] = b;
-    }
-    return colors;
+interface HoverInfo {
+  region: string;
+  group: FunctionalGroup | null;
+  score: number | null;
+  value: number;
+}
+
+interface HemisphereMesh {
+  mesh: THREE.Mesh;
+  offset: number;
+}
+
+function useVertexActivation(url: string, meta: VertexActivationMeta) {
+  const [data, setData] = useState<Uint8Array | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(url)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`Activation data unavailable (${res.status})`);
+        const buf = new Uint8Array(await res.arrayBuffer());
+        const expected = (meta.n_timesteps + 1) * meta.n_vertices;
+        if (buf.length !== expected) {
+          throw new Error(`Activation data has ${buf.length} bytes, expected ${expected}`);
+        }
+        if (!cancelled) setData(buf);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : "Failed to load activation");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [url, meta.n_timesteps, meta.n_vertices]);
+  return { data, error };
+}
+
+function regionMask(atlas: AtlasData, mode: ViewMode): Uint8Array | null {
+  if (mode === "all") return null;
+  const allowed = new Set(
+    (atlas.functional_groups[mode] ?? []).map((name) => atlas.region_names.indexOf(name)),
+  );
+  const mask = new Uint8Array(atlas.vertex_labels.length);
+  for (let i = 0; i < mask.length; i++) {
+    mask[i] = allowed.has(atlas.vertex_labels[i]) ? 1 : 0;
   }
+  return mask;
+}
 
-  const regionScoreMap = new Map<string, number>();
-  let maxScore = 0;
-  for (const rb of regionBreakdown) {
-    if (mode.groups.includes(rb.functional_group)) {
-      regionScoreMap.set(rb.region_name, rb.normalized_score);
-      maxScore = Math.max(maxScore, rb.normalized_score);
-    }
+function paintHemisphere(
+  hemi: HemisphereMesh,
+  frame: Uint8Array,
+  frameOffset: number,
+  mask: Uint8Array | null,
+  wall: Uint8Array | null,
+  lut: Float32Array,
+) {
+  const geom = hemi.mesh.geometry as THREE.BufferGeometry;
+  const count = geom.attributes.position.count;
+  let attr = geom.getAttribute("color") as THREE.BufferAttribute | undefined;
+  if (!attr || attr.count !== count) {
+    attr = new THREE.BufferAttribute(new Float32Array(count * 3), 3);
+    geom.setAttribute("color", attr);
   }
-
-  const regionIdScores = new Map<number, number>();
-  for (let idx = 0; idx < atlasData.region_names.length; idx++) {
-    const name = atlasData.region_names[idx];
-    const score = regionScoreMap.get(name);
-    if (score !== undefined && maxScore > 0) {
-      regionIdScores.set(idx, score / maxScore);
+  const colors = attr.array as Float32Array;
+  for (let i = 0; i < count; i++) {
+    const v = hemi.offset + i;
+    let r: number, g: number, b: number;
+    if (wall && wall[v]) {
+      ({ r, g, b } = MEDIAL_WALL);
+    } else if (mask && !mask[v]) {
+      ({ r, g, b } = DIMMED);
+    } else {
+      [r, g, b] = valueToColor(frame[frameOffset + v] / 255, lut);
     }
-  }
-
-  for (let i = 0; i < vertexCount; i++) {
-    const label = atlasData.vertex_labels[i] ?? -1;
-    const normalizedValue = regionIdScores.get(label) ?? 0.05;
-    const [r, g, b] = valueToColor(normalizedValue, lut);
     colors[i * 3] = r;
     colors[i * 3 + 1] = g;
     colors[i * 3 + 2] = b;
   }
+  attr.needsUpdate = true;
+}
 
-  return colors;
+function groupOf(atlas: AtlasData, region: string): FunctionalGroup | null {
+  for (const [group, regions] of Object.entries(atlas.functional_groups)) {
+    if (regions.includes(region)) return group as FunctionalGroup;
+  }
+  return null;
 }
 
 function BrainMesh({
   meshUrl,
-  atlasData,
+  activation,
+  meta,
+  atlas,
   regionBreakdown,
-  viewMode,
+  mode,
+  frameIndex,
   colormap,
   onHover,
 }: {
   meshUrl: string;
-  atlasData: AtlasData | null;
+  activation: Uint8Array | null;
+  meta: VertexActivationMeta;
+  atlas: AtlasData | null;
   regionBreakdown: RegionBreakdown[];
-  viewMode: ViewMode;
+  mode: ViewMode;
+  frameIndex: number;
   colormap: ColormapName;
-  onHover: (info: { region: string; group: string; score: number; position: THREE.Vector3 } | null) => void;
+  onHover: (info: HoverInfo | null) => void;
 }) {
   const { scene } = useGLTF(meshUrl);
-  const groupRef = useRef<THREE.Group>(null);
-  const colorsRef = useRef<THREE.BufferAttribute | null>(null);
-  const { raycaster, pointer, camera } = useThree();
+  const { camera } = useThree();
 
-  const meshes = useMemo(() => {
-    const result: THREE.Mesh[] = [];
+  const hemispheres = useMemo<HemisphereMesh[]>(() => {
+    const found: HemisphereMesh[] = [];
+    let running = 0;
+    const meshes: THREE.Mesh[] = [];
     scene.traverse((child) => {
-      if (child instanceof THREE.Mesh) {
-        result.push(child);
-      }
+      if (child instanceof THREE.Mesh) meshes.push(child);
     });
-    return result;
-  }, [scene]);
-
-  useEffect(() => {
-    meshes.forEach((mesh) => {
-      const geom = mesh.geometry;
-      const vertexCount = geom.attributes.position.count;
-      const vertexColors = buildVertexColors(
-        vertexCount,
-        atlasData,
-        regionBreakdown,
-        viewMode,
-        colormap,
-      );
-
-      const colorAttr = new THREE.BufferAttribute(vertexColors, 3);
-      geom.setAttribute("color", colorAttr);
-      colorsRef.current = colorAttr;
-
-      mesh.material = new THREE.MeshPhongMaterial({
+    meshes.sort((a, b) => {
+      const aLeft = /left/i.test(a.name) || /left/i.test(a.parent?.name ?? "");
+      const bLeft = /left/i.test(b.name) || /left/i.test(b.parent?.name ?? "");
+      return Number(bLeft) - Number(aLeft);
+    });
+    for (const mesh of meshes) {
+      mesh.material = new THREE.MeshStandardMaterial({
         vertexColors: true,
-        shininess: 30,
-        specular: new THREE.Color(0x222222),
-        side: THREE.DoubleSide,
+        roughness: 0.75,
+        metalness: 0.05,
+        flatShading: false,
       });
-    });
-  }, [meshes, atlasData, regionBreakdown, viewMode, colormap]);
-
-  useFrame(() => {
-    if (!groupRef.current || !atlasData) return;
-
-    raycaster.setFromCamera(pointer, camera);
-    const intersects = raycaster.intersectObjects(meshes, false);
-
-    if (intersects.length > 0) {
-      const hit = intersects[0];
-      const face = hit.face;
-      if (face) {
-        const vIdx = face.a;
-        const labelIdx = atlasData.vertex_labels[vIdx] ?? -1;
-        const regionName = atlasData.region_names[labelIdx] || "Unknown";
-        const funcGroup = atlasData.functional_groups[regionName] || "default_mode";
-        const rb = regionBreakdown.find((r) => r.region_name === regionName);
-        onHover({
-          region: regionName,
-          group: funcGroup,
-          score: rb?.normalized_score ?? 0,
-          position: hit.point.clone(),
-        });
-        return;
-      }
+      const geom = mesh.geometry as THREE.BufferGeometry;
+      if (!geom.getAttribute("normal")) geom.computeVertexNormals();
+      found.push({ mesh, offset: running });
+      running += geom.attributes.position.count;
     }
-    onHover(null);
-  });
-
-  useEffect(() => {
-    if (!groupRef.current || meshes.length === 0) return;
     const box = new THREE.Box3();
     meshes.forEach((m) => box.expandByObject(m));
     const center = box.getCenter(new THREE.Vector3());
     meshes.forEach((m) => m.position.sub(center));
-  }, [meshes]);
+    return found;
+  }, [scene]);
+
+  useEffect(() => {
+    const size = new THREE.Box3().setFromObject(scene).getSize(new THREE.Vector3()).length();
+    camera.position.set(0, size * 0.25, size * 0.95);
+    camera.lookAt(0, 0, 0);
+  }, [scene, camera]);
+
+  const wall = useMemo(() => {
+    if (!atlas) return null;
+    const wallCodes = new Set(atlas.medial_wall.map((n) => atlas.region_names.indexOf(n)));
+    const arr = new Uint8Array(atlas.vertex_labels.length);
+    for (let i = 0; i < arr.length; i++) arr[i] = wallCodes.has(atlas.vertex_labels[i]) ? 1 : 0;
+    return arr;
+  }, [atlas]);
+
+  const mask = useMemo(() => (atlas ? regionMask(atlas, mode) : null), [atlas, mode]);
+  const lut = useMemo(() => buildLUT(colormap), [colormap]);
+
+  useEffect(() => {
+    if (!activation) return;
+    const frameOffset = frameIndex * meta.n_vertices;
+    hemispheres.forEach((hemi) => paintHemisphere(hemi, activation, frameOffset, mask, wall, lut));
+  }, [activation, frameIndex, hemispheres, mask, wall, lut, meta.n_vertices]);
+
+  const regionScores = useMemo(
+    () => new Map(regionBreakdown.map((r) => [r.region_name, r.normalized_score])),
+    [regionBreakdown],
+  );
+
+  const handleMove = useCallback(
+    (hemi: HemisphereMesh) => (event: ThreeEvent<PointerEvent>) => {
+      event.stopPropagation();
+      if (!atlas || !activation || !event.face) return;
+      const v = hemi.offset + event.face.a;
+      const label = atlas.vertex_labels[v];
+      const region = atlas.region_names[label] ?? "unknown";
+      const group = groupOf(atlas, region);
+      onHover({
+        region,
+        group,
+        score: regionScores.get(region) ?? null,
+        value: activation[frameIndex * meta.n_vertices + v] / 255,
+      });
+    },
+    [atlas, activation, frameIndex, meta.n_vertices, onHover, regionScores],
+  );
 
   return (
-    <group ref={groupRef}>
-      {meshes.map((mesh, i) => (
-        <primitive key={i} object={mesh} />
+    <group>
+      {hemispheres.map((hemi) => (
+        <primitive
+          key={hemi.mesh.uuid}
+          object={hemi.mesh}
+          onPointerMove={handleMove(hemi)}
+          onPointerOut={() => onHover(null)}
+        />
       ))}
     </group>
   );
 }
 
-function HoverTooltip({
-  info,
-}: {
-  info: { region: string; group: string; score: number; position: THREE.Vector3 } | null;
-}) {
-  if (!info) return null;
-
-  const groupColors: Record<string, string> = {
-    visual: "#22d3ee",
-    attention: "#3b82f6",
-    emotional: "#8b5cf6",
-    language: "#34d399",
-    default_mode: "#64748b",
-  };
-
-  return (
-    <Html position={info.position} center style={{ pointerEvents: "none" }}>
-      <div className="pointer-events-none -translate-y-full whitespace-nowrap rounded-lg border border-slate-700/80 bg-[#0a0e1a]/95 px-3 py-2 shadow-xl backdrop-blur-sm">
-        <p className="text-xs font-semibold text-slate-200">{info.region}</p>
-        <div className="mt-1 flex items-center gap-2">
-          <span
-            className="h-1.5 w-1.5 rounded-full"
-            style={{ background: groupColors[info.group] || "#64748b" }}
-          />
-          <span className="text-[10px] capitalize text-slate-400">
-            {info.group.replace("_", " ")}
-          </span>
-          <span
-            className="ml-1 font-mono text-[10px] font-bold"
-            style={{ color: groupColors[info.group] || "#64748b" }}
-          >
-            {info.score.toFixed(1)}
-          </span>
-        </div>
-      </div>
-    </Html>
-  );
-}
-
 export function BrainHeatmap({
   meshUrl,
+  activationUrl,
+  activationMeta,
+  atlas,
   regionBreakdown,
-  atlasData = null,
+  timeLabels,
   colormap = "viridis",
 }: BrainHeatmapProps) {
-  const [viewMode, setViewMode] = useState<ViewMode>("combined");
-  const [hoveredRegion, setHoveredRegion] = useState<{
-    region: string;
-    group: string;
-    score: number;
-    position: THREE.Vector3;
-  } | null>(null);
+  const [mode, setMode] = useState<ViewMode>("all");
+  const [frame, setFrame] = useState(0);
+  const [hover, setHover] = useState<HoverInfo | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const { data: activation, error } = useVertexActivation(activationUrl, activationMeta);
+  const playRef = useRef<number | null>(null);
 
-  const handleHover = useCallback(
-    (
-      info: {
-        region: string;
-        group: string;
-        score: number;
-        position: THREE.Vector3;
-      } | null,
-    ) => {
-      setHoveredRegion(info);
-    },
-    [],
-  );
+  useEffect(() => {
+    if (!playing) return;
+    playRef.current = window.setInterval(() => {
+      setFrame((f) => (f >= activationMeta.n_timesteps ? 1 : f + 1));
+    }, 700);
+    return () => {
+      if (playRef.current) window.clearInterval(playRef.current);
+    };
+  }, [playing, activationMeta.n_timesteps]);
+
+  const frameLabel =
+    frame === 0
+      ? "Time-averaged"
+      : `t = ${(timeLabels[frame - 1] ?? frame - 1).toFixed(1)}s`;
 
   return (
-    <div className="flex h-full flex-col">
-      {/* View mode toggles */}
-      <div className="mb-4 flex items-center justify-between">
-        <div className="flex gap-1 rounded-xl bg-slate-900/60 p-1">
-          {VIEW_MODES.map((mode) => (
+    <div className="flex h-full flex-col gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap gap-1 rounded-xl bg-slate-900/60 p-1">
+          {VIEW_MODES.map((m) => (
             <button
-              key={mode.key}
-              onClick={() => setViewMode(mode.key)}
+              key={m.key}
+              onClick={() => setMode(m.key)}
               className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                viewMode === mode.key
+                mode === m.key
                   ? "bg-slate-700/80 text-slate-100 shadow-sm"
                   : "text-slate-500 hover:text-slate-300"
               }`}
             >
-              {mode.label}
+              {m.key !== "all" && (
+                <span
+                  className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full align-middle"
+                  style={{ background: GROUP_COLORS[m.key] }}
+                />
+              )}
+              {m.label}
             </button>
           ))}
         </div>
-        {hoveredRegion && (
-          <div className="flex items-center gap-2 text-xs text-slate-400">
-            <span className="font-medium text-slate-300">
-              {hoveredRegion.region}
-            </span>
-            <span className="font-mono text-cyan-400">
-              {hoveredRegion.score.toFixed(1)}
-            </span>
-          </div>
-        )}
+        <div className="flex min-h-[1.5rem] items-center gap-2 text-xs text-slate-400">
+          {hover ? (
+            <>
+              <span className="font-medium text-slate-200">{hover.region}</span>
+              {hover.group && (
+                <span className="capitalize" style={{ color: GROUP_COLORS[hover.group] }}>
+                  {GROUP_LABELS[hover.group]}
+                </span>
+              )}
+              {hover.score !== null && (
+                <span className="font-mono text-cyan-300">{hover.score.toFixed(1)}/10</span>
+              )}
+            </>
+          ) : (
+            <span className="text-slate-600">Hover the cortex to inspect a region</span>
+          )}
+        </div>
       </div>
 
-      {/* 3D Canvas */}
       <div className="relative flex-1 overflow-hidden rounded-2xl border border-slate-800/40 bg-[#060a14]">
         <Canvas
-          camera={{ position: [0, 0, 200], fov: 45, near: 1, far: 1000 }}
-          dpr={[1, Math.min(window.devicePixelRatio, 2)]}
+          camera={{ fov: 40, near: 1, far: 2000, position: [0, 40, 260] }}
+          dpr={[1, 2]}
           gl={{ antialias: true, alpha: false }}
         >
           <color attach="background" args={["#060a14"]} />
-          <ambientLight intensity={0.5} />
-          <directionalLight position={[100, 80, 100]} intensity={0.8} />
-          <directionalLight position={[-100, -40, -60]} intensity={0.3} />
-
+          <hemisphereLight args={["#dbe7ff", "#0b1020", 0.9]} />
+          <directionalLight position={[120, 100, 120]} intensity={1.1} />
+          <directionalLight position={[-120, -40, -80]} intensity={0.35} />
           <BrainMesh
             meshUrl={meshUrl}
-            atlasData={atlasData}
+            activation={activation}
+            meta={activationMeta}
+            atlas={atlas}
             regionBreakdown={regionBreakdown}
-            viewMode={viewMode}
+            mode={mode}
+            frameIndex={frame}
             colormap={colormap}
-            onHover={handleHover}
+            onHover={setHover}
           />
-
-          <HoverTooltip info={hoveredRegion} />
-
           <OrbitControls
             enableDamping
             dampingFactor={0.08}
             rotateSpeed={0.6}
             zoomSpeed={0.8}
-            minDistance={80}
-            maxDistance={400}
+            minDistance={90}
+            maxDistance={500}
           />
         </Canvas>
 
-        <div className="pointer-events-none absolute bottom-4 left-4 right-4">
-          <ColorLegend colormap={colormap} min={0} max={10} />
-        </div>
+        {error && (
+          <div className="absolute inset-x-4 top-4 rounded-lg border border-amber-500/30 bg-amber-950/70 px-3 py-2 text-xs text-amber-200">
+            {error}
+          </div>
+        )}
+        {!atlas && !error && (
+          <div className="absolute right-4 top-4 rounded-lg border border-slate-700/60 bg-slate-900/70 px-3 py-1.5 text-[10px] text-slate-400">
+            Loading atlas…
+          </div>
+        )}
 
-        <div className="pointer-events-none absolute right-4 top-4 text-[10px] text-slate-600">
-          Drag to rotate · Scroll to zoom
+        <div className="pointer-events-none absolute bottom-4 left-4 right-4">
+          <ColorLegend
+            colormap={colormap}
+            min={0}
+            max={1}
+            label={`Predicted activation · ${frameLabel}`}
+          />
         </div>
+      </div>
+
+      <div className="flex items-center gap-3 rounded-xl border border-slate-800/50 bg-slate-900/40 px-4 py-2">
+        <button
+          onClick={() => setPlaying((p) => !p)}
+          disabled={activationMeta.n_timesteps < 2}
+          className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-800 text-slate-300 transition hover:bg-slate-700 disabled:opacity-40"
+          aria-label={playing ? "Pause" : "Play"}
+        >
+          {playing ? (
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="5" y="4" width="5" height="16" />
+              <rect x="14" y="4" width="5" height="16" />
+            </svg>
+          ) : (
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M6 4l14 8-14 8z" />
+            </svg>
+          )}
+        </button>
+        <input
+          type="range"
+          min={0}
+          max={activationMeta.n_timesteps}
+          step={1}
+          value={frame}
+          onChange={(e) => {
+            setPlaying(false);
+            setFrame(parseInt(e.target.value, 10));
+          }}
+          className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-slate-700 accent-cyan-400"
+        />
+        <span className="w-28 text-right font-mono text-[11px] text-slate-400">{frameLabel}</span>
       </div>
     </div>
   );

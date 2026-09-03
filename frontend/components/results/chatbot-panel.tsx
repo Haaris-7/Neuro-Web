@@ -27,31 +27,42 @@ interface ChatMessage {
 
 function generateStarterPrompts(report: AnalysisReport): string[] {
   const prompts: string[] = [];
-
-  const topRegion = report.scores.region_breakdown
-    .sort((a, b) => b.normalized_score - a.normalized_score)[0];
+  const topRegion = report.scores.region_breakdown[0];
   if (topRegion) {
-    prompts.push(`Why is ${topRegion.region_name} so active?`);
+    prompts.push(`Why is the ${topRegion.region_name} region so active?`);
   }
-
   if (report.dark_patterns.patterns.length > 0) {
-    prompts.push("What dark patterns were detected?");
+    prompts.push("Which dark patterns were detected and how confident are they?");
   }
-
-  const peaks = report.timeline.peaks;
-  if (peaks.length > 0) {
-    prompts.push(
-      `Explain the activation spike at ${peaks[0].time_s.toFixed(1)}s`,
-    );
+  const peak = report.timeline.peaks[0];
+  if (peak) {
+    prompts.push(`What happened at the ${peak.time_s.toFixed(1)}s activation peak?`);
   }
-
-  if (report.scores.emotion_score > 5) {
+  if (report.scores.emotion_score > 6) {
     prompts.push("Why is the emotion score elevated?");
+  } else if (report.scores.attention_score > 6) {
+    prompts.push("What drives the high attention score?");
   }
-
   prompts.push("Give me a plain-language summary of this analysis");
-
   return prompts.slice(0, 4);
+}
+
+function parseSseChunk(chunk: string): { text: string; error: string | null } {
+  let text = "";
+  let error: string | null = null;
+  for (const line of chunk.split("\n")) {
+    if (!line.startsWith("data:")) continue;
+    const data = line.slice(5).trim();
+    if (!data || data === "[DONE]") continue;
+    try {
+      const parsed = JSON.parse(data) as { content?: string; error?: string };
+      if (parsed.error) error = parsed.error;
+      text += parsed.content ?? "";
+    } catch {
+      text += data;
+    }
+  }
+  return { text, error };
 }
 
 export function ChatbotPanel({
@@ -111,7 +122,12 @@ export function ChatbotPanel({
         });
 
         if (!res.ok) {
-          throw new Error(`Chat failed: ${res.status}`);
+          const body = await res.json().catch(() => null);
+          const detail =
+            body && typeof body === "object" && "detail" in body
+              ? String((body as { detail: unknown }).detail)
+              : `Chat failed (${res.status})`;
+          throw new Error(detail);
         }
 
         const contentType = res.headers.get("content-type") || "";
@@ -120,38 +136,32 @@ export function ChatbotPanel({
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
           let accumulated = "";
+          let buffered = "";
           const assistantId = crypto.randomUUID();
 
           setMessages((prev) => [
             ...prev,
-            {
-              id: assistantId,
-              role: "assistant",
-              content: "",
-              timestamp: new Date(),
-            },
+            { id: assistantId, role: "assistant", content: "", timestamp: new Date() },
           ]);
 
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split("\n");
-            for (const line of lines) {
-              if (line.startsWith("data: ")) {
-                const data = line.slice(6);
-                if (data === "[DONE]") continue;
-                try {
-                  const parsed = JSON.parse(data);
-                  accumulated += parsed.content || parsed.text || "";
-                } catch {
-                  accumulated += data;
-                }
-              }
-            }
+            buffered += decoder.decode(value, { stream: true });
+            const boundary = buffered.lastIndexOf("\n");
+            if (boundary < 0) continue;
+            const { text, error } = parseSseChunk(buffered.slice(0, boundary));
+            buffered = buffered.slice(boundary + 1);
+            if (error) accumulated += `\n\nError: ${error}`;
+            accumulated += text;
+            setMessages((prev) =>
+              prev.map((m) => (m.id === assistantId ? { ...m, content: accumulated } : m)),
+            );
+          }
+          if (!accumulated) {
             setMessages((prev) =>
               prev.map((m) =>
-                m.id === assistantId ? { ...m, content: accumulated } : m,
+                m.id === assistantId ? { ...m, content: "The assistant returned no text." } : m,
               ),
             );
           }
@@ -215,10 +225,10 @@ export function ChatbotPanel({
         <div className="flex items-center justify-between border-b border-slate-800/60 px-5 py-4">
           <div>
             <h3 className="text-sm font-semibold text-slate-200">
-              AI Assistant
+              Ask about this analysis
             </h3>
             <p className="text-[10px] text-slate-500">
-              Powered by {provider} · AI-generated responses
+              {provider} · grounded in this report&apos;s data
             </p>
           </div>
           <button

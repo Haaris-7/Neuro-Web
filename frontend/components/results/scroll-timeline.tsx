@@ -17,6 +17,7 @@ import type { TimelineData, DarkPatternMatch } from "@/lib/types";
 interface ScrollTimelineProps {
   timeline: TimelineData;
   darkPatterns: DarkPatternMatch[];
+  viewportHeight: number;
 }
 
 type SeriesKey = "overall" | "attention" | "emotion";
@@ -63,7 +64,7 @@ function CustomTooltip({
             :
           </span>
           <span className="font-mono font-medium" style={{ color: entry.color }}>
-            {entry.value.toFixed(2)}
+            {entry.value.toFixed(1)}
           </span>
         </div>
       ))}
@@ -74,6 +75,7 @@ function CustomTooltip({
 export function ScrollTimeline({
   timeline,
   darkPatterns,
+  viewportHeight,
 }: ScrollTimelineProps) {
   const [activeSeries, setActiveSeries] = useState<Set<SeriesKey>>(
     new Set(["overall", "attention", "emotion"]),
@@ -92,20 +94,23 @@ export function ScrollTimeline({
   );
 
   const dpMarkers = useMemo(() => {
-    return darkPatterns
-      .filter((dp) => dp.bbox)
-      .map((dp) => {
-        const scrollY = dp.bbox!.scroll_y;
-        const closest = timeline.series.reduce(
-          (best, pt) => {
-            const dist = Math.abs(pt.scroll_position_px - scrollY);
-            return dist < best.dist ? { pt, dist } : best;
-          },
-          { pt: timeline.series[0], dist: Infinity },
-        );
-        return { dp, time_s: closest.pt?.time_s ?? 0 };
-      });
-  }, [darkPatterns, timeline.series]);
+    if (timeline.series.length === 0) return [];
+    const markers = darkPatterns.flatMap((dp) => {
+      if (!dp.bbox) return [];
+      const elementY = dp.bbox.y;
+      const first = timeline.series.find(
+        (pt) => elementY < pt.scroll_position_px + viewportHeight && elementY + dp.bbox!.height > pt.scroll_position_px,
+      );
+      return first ? [{ dp, time_s: first.time_s }] : [];
+    });
+    const seen = new Set<string>();
+    return markers.filter((m) => {
+      const key = `${m.dp.pattern_type}@${m.time_s.toFixed(1)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [darkPatterns, timeline.series, viewportHeight]);
 
   const toggleSeries = (key: SeriesKey) => {
     setActiveSeries((prev) => {
@@ -145,7 +150,7 @@ export function ScrollTimeline({
           </button>
         ))}
         <span className="text-[10px] text-slate-600">
-          Duration: {timeline.duration_s.toFixed(1)}s
+          {timeline.series.length} timesteps · {timeline.duration_s.toFixed(1)}s · scores 0–10
         </span>
       </div>
 
@@ -170,7 +175,7 @@ export function ScrollTimeline({
               tickLine={{ stroke: "#1e293b" }}
             />
             <YAxis
-              domain={[0, "auto"]}
+              domain={[0, 10]}
               tick={{ fill: "#475569", fontSize: 10 }}
               axisLine={{ stroke: "#1e293b" }}
               tickLine={{ stroke: "#1e293b" }}
@@ -253,11 +258,9 @@ export function ScrollTimeline({
                   {peak.time_s.toFixed(1)}s
                 </span>
                 <span className="font-mono text-[10px] font-semibold text-amber-300">
-                  {peak.intensity.toFixed(2)}
+                  {peak.intensity.toFixed(1)}
                 </span>
-                <span className="text-[10px] capitalize text-slate-500">
-                  {peak.dominant_group.replace("_", " ")}
-                </span>
+                <span className="text-[10px] text-slate-500">{peak.description}</span>
               </div>
             ))}
           </div>
