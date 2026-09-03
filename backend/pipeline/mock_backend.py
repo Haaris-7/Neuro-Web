@@ -56,6 +56,8 @@ def _viewport_stats(
     bottom = top + viewport_h
 
     def on_screen(item: dict[str, Any]) -> bool:
+        if item.get("fixed"):
+            return True
         y = float(item.get("y", 0.0))
         h = float(item.get("height", 0.0))
         return y < bottom and y + h > top

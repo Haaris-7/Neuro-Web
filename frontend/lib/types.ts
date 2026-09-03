@@ -119,6 +119,7 @@ export interface TimelineData {
 export interface ElementOverlay {
   tag: string;
   bbox: BBox;
+  fixed: boolean;
   intensity: number;
   attention_contrib: number;
   emotion_contrib: number;

@@ -1,9 +1,16 @@
 import json
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Annotated, Any
 
+from fastapi import Path
 from pydantic import BaseModel
+
+UUID_PATTERN = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+
+# Job ids are server-issued UUID4s; rejecting anything else at the router keeps
+# path traversal out of every filesystem lookup keyed by job id.
+JobId = Annotated[str, Path(pattern=UUID_PATTERN)]
 
 
 class JobStatus(str, Enum):

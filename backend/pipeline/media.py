@@ -21,6 +21,10 @@ def _ffmpeg_binary(name: str) -> str | None:
     return None
 
 
+def ffmpeg_available() -> bool:
+    return _ffmpeg_binary("ffmpeg") is not None
+
+
 def transcode_to_mp4(
     source: Path,
     target: Path,

@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException
 from config import settings
 from database import get_db
 from engine.report import load_report
-from models.job import JobCreate, JobResponse, JobStatus, job_from_row
+from models.job import JobCreate, JobId, JobResponse, JobStatus, job_from_row
 from pipeline.url_validator import validate_url
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -48,7 +48,7 @@ async def list_jobs() -> list[JobResponse]:
 
 
 @router.get("/{job_id}", response_model=JobResponse)
-async def get_job_by_id(job_id: str) -> JobResponse:
+async def get_job_by_id(job_id: JobId) -> JobResponse:
     async with get_db() as db:
         cur = await db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,))
         row = await cur.fetchone()
@@ -58,7 +58,7 @@ async def get_job_by_id(job_id: str) -> JobResponse:
 
 
 @router.get("/{job_id}/report")
-async def get_job_report(job_id: str) -> dict:
+async def get_job_report(job_id: JobId) -> dict:
     async with get_db() as db:
         cur = await db.execute("SELECT status FROM jobs WHERE id = ?", (job_id,))
         row = await cur.fetchone()
@@ -73,7 +73,7 @@ async def get_job_report(job_id: str) -> dict:
 
 
 @router.delete("/{job_id}", status_code=204)
-async def delete_job(job_id: str) -> None:
+async def delete_job(job_id: JobId) -> None:
     async with get_db() as db:
         cur = await db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
     if cur.rowcount == 0:

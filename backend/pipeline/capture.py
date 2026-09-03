@@ -3,28 +3,50 @@ import json
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 from playwright.async_api import async_playwright
 
 from pipeline.media import transcode_to_mp4
-from pipeline.url_validator import validate_url
+from pipeline.url_validator import request_is_allowed, validate_url
 
 SCROLL_STEPS_PER_SECOND = 10
 MAX_SCREENSHOT_HEIGHT_PX = 12000
 SCREENSHOT_TIMEOUT_MS = 90000
+REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 _DOM_SNAPSHOT_JS = """
 () => {
   const sy = window.scrollY;
   const sx = window.scrollX;
-  const visible = (el, r) => {
+  const visible = (el, r, box) => {
     if (r.width <= 0 || r.height <= 0) return false;
+    // Children of sticky/fixed containers that sit outside the viewport (e.g. a
+    // long sticky sidebar) are not on screen and have no usable page position.
+    if (box.fixed && (r.bottom <= 0 || r.top >= window.innerHeight)) return false;
     const cs = window.getComputedStyle(el);
     return cs.visibility !== "hidden" && cs.display !== "none" && parseFloat(cs.opacity || "1") > 0.05;
   };
+  const isPinned = (el) => {
+    for (let node = el; node && node !== document.body; node = node.parentElement) {
+      const pos = window.getComputedStyle(node).position;
+      if (pos === "fixed" || pos === "sticky") return true;
+    }
+    return false;
+  };
+  // Fixed/sticky nodes have no stable page coordinate; report the part of them
+  // that is on screen, in viewport coordinates, and flag them so consumers
+  // treat them as always visible.
   const rectOf = (el) => {
     const r = el.getBoundingClientRect();
-    return { r, box: { x: r.x + sx, y: r.y + sy, width: r.width, height: r.height } };
+    if (!isPinned(el)) {
+      return { r, box: { x: r.x + sx, y: r.y + sy, width: r.width, height: r.height, fixed: false } };
+    }
+    const top = Math.max(r.top, 0);
+    const bottom = Math.min(r.bottom, window.innerHeight);
+    const left = Math.max(r.left, 0);
+    const right = Math.min(r.right, window.innerWidth);
+    return { r, box: { x: left, y: top, width: Math.max(right - left, 0), height: Math.max(bottom - top, 0), fixed: true } };
   };
 
   const buttonClass = /\\b(btn|button|cta|submit|primary|secondary)\\b/i;
@@ -47,7 +69,7 @@ _DOM_SNAPSHOT_JS = """
     for (const el of document.querySelectorAll(tag)) {
       if (tag === "input" && !["submit", "button", "reset"].includes(el.type)) continue;
       const { r, box } = rectOf(el);
-      if (!visible(el, r)) continue;
+      if (!visible(el, r, box)) continue;
       const key = `${tag}:${Math.round(box.x)}:${Math.round(box.y)}:${Math.round(box.width)}:${Math.round(box.height)}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -63,9 +85,12 @@ _DOM_SNAPSHOT_JS = """
     }
   }
 
-  const textTags = "h1,h2,h3,h4,h5,h6,p,li,td,th,dt,dd,blockquote,figcaption,label,button,a,summary,span,strong,em,small,legend,caption,option";
+  // Every element contributes only its own text nodes, so nesting never
+  // duplicates copy and bare <div> text is not lost.
+  const skipTags = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "CANVAS", "IFRAME", "HEAD", "TITLE", "META", "LINK"]);
   const blocks = [];
-  for (const el of document.querySelectorAll(textTags)) {
+  for (const el of document.body.querySelectorAll("*")) {
+    if (skipTags.has(el.tagName) || el.closest("svg")) continue;
     let own = "";
     for (const node of el.childNodes) {
       if (node.nodeType === Node.TEXT_NODE) own += node.textContent + " ";
@@ -73,7 +98,7 @@ _DOM_SNAPSHOT_JS = """
     own = own.replace(/\\s+/g, " ").trim();
     if (own.length < 2) continue;
     const { r, box } = rectOf(el);
-    if (!visible(el, r)) continue;
+    if (!visible(el, r, box)) continue;
     blocks.push({ tag: el.tagName.toLowerCase(), ...box, text: own.slice(0, 1000) });
   }
   blocks.sort((a, b) => (a.y - b.y) || (a.x - b.x));
@@ -105,17 +130,6 @@ _DOM_SNAPSHOT_JS = """
 """
 
 
-def _redirect_hop_count(response) -> int:
-    if response is None:
-        return 0
-    n = 0
-    request = response.request
-    while request.redirected_from:
-        n += 1
-        request = request.redirected_from
-    return n
-
-
 def _job_paths(job_dir: Path, data_root: Path) -> dict[str, Path]:
     paths = {
         "screenshot": job_dir / "page.png",
@@ -129,6 +143,54 @@ def _job_paths(job_dir: Path, data_root: Path) -> dict[str, Path]:
     for p in paths.values():
         p.resolve().relative_to(data_root)
     return paths
+
+
+def _egress_policy(max_redirects: int, navigation: dict[str, str]):
+    """Build a route handler that fetches every request itself so each redirect
+    hop is policy-checked.
+
+    Playwright invokes route handlers once per request and follows redirects
+    internally, so `route.continue_()` would let an allowed host bounce the
+    browser to a private or metadata address. Fetching with redirects disabled
+    and walking the chain here closes that gap. The final URL of the top-level
+    document is recorded in ``navigation["final_url"]``.
+    """
+
+    async def enforce(route) -> None:
+        request = route.request
+        url = request.url
+        if not await asyncio.to_thread(request_is_allowed, url):
+            await route.abort("blockedbyclient")
+            return
+        method = request.method
+        body = request.post_data_buffer
+        try:
+            response = await route.fetch(max_redirects=0)
+            hops = 0
+            while response.status in REDIRECT_STATUSES:
+                location = response.headers.get("location")
+                if not location:
+                    break
+                target = urljoin(url, location)
+                hops += 1
+                if hops > max_redirects or not await asyncio.to_thread(request_is_allowed, target):
+                    await route.abort("blockedbyclient")
+                    return
+                if response.status == 303 or (
+                    response.status in (301, 302) and method not in ("GET", "HEAD")
+                ):
+                    method, body = "GET", None
+                response = await route.fetch(
+                    url=target, method=method, post_data=body, max_redirects=0
+                )
+                url = target
+            if request.is_navigation_request() and request.frame.parent_frame is None:
+                navigation["final_url"] = url
+            await route.fulfill(response=response)
+        except Exception:
+            await route.abort("failed")
+
+    return enforce
 
 
 async def _write_json(path: Path, payload: Any) -> None:
@@ -154,7 +216,7 @@ async def capture_website(job_id: str, url: str, config: dict[str, Any]) -> dict
     max_video_bytes = int(config["max_video_size_mb"]) * 1024 * 1024
     paths = _job_paths(job_dir, data_root)
 
-    final_url = url
+    navigation = {"final_url": url}
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         try:
@@ -166,14 +228,14 @@ async def capture_website(job_id: str, url: str, config: dict[str, Any]) -> dict
             )
             context.set_default_timeout(default_timeout_ms)
             context.set_default_navigation_timeout(nav_timeout_ms)
+            await context.route("**/*", _egress_policy(max_redirects, navigation))
             try:
                 recording_started = time.perf_counter()
                 page = await context.new_page()
                 response = await page.goto(url, wait_until="load", timeout=nav_timeout_ms)
-                if _redirect_hop_count(response) > max_redirects:
-                    raise ValueError("Exceeded maximum redirects")
-                final_url = page.url
-                await asyncio.to_thread(validate_url, final_url)
+                if response is None or response.status >= 400:
+                    status = response.status if response else "no response"
+                    raise ValueError(f"Page could not be loaded ({status})")
 
                 scroll_height = float(
                     await page.evaluate(
@@ -181,13 +243,16 @@ async def capture_website(job_id: str, url: str, config: dict[str, Any]) -> dict
                     )
                 )
                 max_scroll = max(0.0, scroll_height - viewport_h)
-                steps = max(1, int(duration_s * SCROLL_STEPS_PER_SECOND))
-                step_delay = duration_s / steps
+                tick_s = 1.0 / SCROLL_STEPS_PER_SECOND
                 timeline: list[dict[str, float]] = []
                 t0 = time.perf_counter()
                 scroll_offset_s = t0 - recording_started
-                for i in range(steps + 1):
-                    y = max_scroll * i / steps
+                # Scroll position is a function of elapsed time so the recording
+                # honours CAPTURE_DURATION even when the page makes each evaluate slow.
+                while True:
+                    tick_start = time.perf_counter()
+                    progress = min((tick_start - t0) / duration_s, 1.0)
+                    y = max_scroll * progress
                     await page.evaluate("(y) => window.scrollTo(0, y)", y)
                     timeline.append(
                         {
@@ -195,8 +260,9 @@ async def capture_website(job_id: str, url: str, config: dict[str, Any]) -> dict
                             "scroll_y": round(y, 2),
                         }
                     )
-                    if i < steps:
-                        await asyncio.sleep(step_delay)
+                    if progress >= 1.0:
+                        break
+                    await asyncio.sleep(max(0.0, tick_s - (time.perf_counter() - tick_start)))
                 capture_elapsed_s = time.perf_counter() - t0
 
                 dom = await page.evaluate(_DOM_SNAPSHOT_JS)
@@ -250,6 +316,11 @@ async def capture_website(job_id: str, url: str, config: dict[str, Any]) -> dict
         start_s=scroll_offset_s,
         duration_s=capture_elapsed_s,
     )
+    if mp4 is None and config.get("require_transcode", False):
+        raise RuntimeError(
+            "ffmpeg is required to prepare the recording for TRIBE v2 (Playwright's WebM has "
+            "no duration metadata). Install ffmpeg and make sure it is on PATH."
+        )
     video_path = mp4 if mp4 is not None else paths["video_webm"]
 
     meta = {
@@ -261,7 +332,7 @@ async def capture_website(job_id: str, url: str, config: dict[str, Any]) -> dict
         "text": str(paths["text"]),
         "dom": str(paths["dom"]),
         "scroll_timeline": str(paths["scroll_timeline"]),
-        "final_url": final_url,
+        "final_url": navigation["final_url"],
         "viewport_w": viewport_w,
         "viewport_h": viewport_h,
         "page_height": dom.get("page_height"),

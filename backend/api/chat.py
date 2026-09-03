@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import time
+from collections import defaultdict, deque
 from typing import Any, AsyncIterator
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from config import settings
 from engine.report import load_report
+from models.job import JobId
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -38,6 +42,30 @@ report, say so instead of guessing.
 
 REPORT JSON:
 """
+
+
+class RateLimiter:
+    """Fixed-size sliding window per client; protects the server-side LLM key."""
+
+    def __init__(self, limit: int, window_s: float = 60.0) -> None:
+        self.limit = limit
+        self.window_s = window_s
+        self._hits: dict[str, deque[float]] = defaultdict(deque)
+        self._lock = threading.Lock()
+
+    def allow(self, key: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            hits = self._hits[key]
+            while hits and now - hits[0] > self.window_s:
+                hits.popleft()
+            if len(hits) >= self.limit:
+                return False
+            hits.append(now)
+            return True
+
+
+_rate_limiter = RateLimiter(settings.CHAT_RATE_LIMIT_PER_MINUTE)
 
 
 class ChatTurn(BaseModel):
@@ -151,9 +179,15 @@ async def _raise_for_status(resp: httpx.Response) -> None:
 
 
 @router.post("/{job_id}")
-async def chat(job_id: str, payload: ChatRequest) -> EventSourceResponse:
+async def chat(job_id: JobId, payload: ChatRequest, request: Request) -> EventSourceResponse:
     if not settings.llm_available:
         raise HTTPException(status_code=503, detail="LLM chat is not configured (set LLM_API_KEY)")
+    client = request.client.host if request.client else "unknown"
+    if not _rate_limiter.allow(client):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Chat rate limit of {settings.CHAT_RATE_LIMIT_PER_MINUTE} requests/minute exceeded",
+        )
     report = await asyncio.to_thread(load_report, job_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")

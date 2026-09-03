@@ -63,8 +63,6 @@ class ActivationContext:
         self.ref_std = float(self.region_means.std()) + EPS
         self.pooled_mean = float(self.region_series.mean())
         self.pooled_std = float(self.region_series.std()) + EPS
-        self.variance_ref_mean = float(self.region_series.var(axis=0).mean())
-        self.variance_ref_std = float(self.region_series.var(axis=0).std()) + EPS
 
     def vertices_for(self, groups: tuple[str, ...]) -> np.ndarray:
         parts = [self.group_vertices[g] for g in groups if self.group_vertices[g].size]
@@ -91,9 +89,22 @@ class ActivationContext:
     def overall_series(self) -> np.ndarray:
         return self.predictions[:, self.cortical_idx].mean(axis=1)
 
+    def temporal_variance_ratio(self) -> float:
+        """How much regions fluctuate over the scroll relative to how much they differ.
+
+        Both terms are computed on the same region-level series, so the ratio is
+        not damped by averaging over vertices: 1.0 means the typical region moves
+        over time as much as regions differ from one another.
+        """
+        if self.n_timesteps < 2:
+            return 0.0
+        temporal = float(self.region_series.var(axis=0).mean())
+        spatial = float(self.region_means.var()) + EPS
+        return temporal / spatial
+
     def temporal_variance_score(self) -> float:
-        raw = float(np.var(self.overall_series()))
-        return _sigmoid_score((raw - self.variance_ref_mean) / self.variance_ref_std)
+        ratio = self.temporal_variance_ratio()
+        return float(np.clip(10.0 * ratio / (1.0 + ratio), 0.0, 10.0))
 
 
 def _sigmoid_score(z: float, gain: float = SIGMOID_GAIN) -> float:

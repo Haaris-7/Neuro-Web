@@ -102,6 +102,8 @@ def _friendly_error(stage: JobStatus, exc: Exception) -> str:
     msg = str(exc)
     lowered = msg.lower()
     if stage == JobStatus.capturing:
+        if "ffmpeg" in lowered:
+            return msg
         if "screenshot" in lowered and "timeout" in lowered:
             return "Taking the page screenshot timed out. The page may be extremely long or heavy."
         if "timeout" in lowered:
@@ -143,6 +145,7 @@ async def _process_job(job_id: str, url: str) -> None:
                 "default_timeout_ms": 30000,
                 "max_redirects": settings.MAX_REDIRECTS,
                 "max_video_size_mb": settings.MAX_VIDEO_SIZE_MB,
+                "require_transcode": settings.INFERENCE_BACKEND == "tribe",
             },
         )
         await _update_job(job_id, JobStatus.analyzing, metadata=capture_meta)

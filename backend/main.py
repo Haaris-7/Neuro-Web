@@ -15,6 +15,7 @@ from config import settings
 from database import init_db, reconcile_stale_jobs
 from engine.atlas import load_atlas
 from engine.mesh_export import ensure_brain_mesh
+from pipeline.media import ffmpeg_available
 from pipeline.model_manager import GPUInfo, ModelManager
 from worker import worker_loop
 
@@ -60,6 +61,11 @@ async def lifespan(app: FastAPI):
         settings.LLM_PROVIDER if settings.llm_available else "disabled",
     )
     await _prepare_assets()
+    if settings.INFERENCE_BACKEND == "tribe" and not ffmpeg_available():
+        logger.warning(
+            "ffmpeg not found: captures cannot be prepared for TRIBE v2 and jobs will fail "
+            "at the capture stage until it is installed"
+        )
 
     manager = ModelManager.get()
     model_ready = asyncio.create_task(_load_model(manager))
@@ -102,7 +108,7 @@ async def health() -> dict:
 
 
 def main() -> None:
-    uvicorn.run("main:app", host="0.0.0.0", port=settings.BACKEND_PORT, reload=False)
+    uvicorn.run("main:app", host=settings.BACKEND_HOST, port=settings.BACKEND_PORT, reload=False)
 
 
 if __name__ == "__main__":

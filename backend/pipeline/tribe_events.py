@@ -32,12 +32,15 @@ class TextBlock:
     text: str
     y: float
     height: float
+    fixed: bool = False
 
 
 def _visible_window(
     block: TextBlock, scroll_timeline: list[dict[str, float]], viewport_h: float
 ) -> tuple[float, float] | None:
     """Return the [enter, exit) interval (seconds) during which the block is on screen."""
+    if block.fixed:
+        return 0.0, float("inf")
     enter: float | None = None
     exit_t: float | None = None
     for sample in scroll_timeline:
@@ -134,6 +137,7 @@ def text_blocks_from_dom(dom: dict[str, Any]) -> list[TextBlock]:
                 text=text,
                 y=float(item.get("y", 0.0)),
                 height=float(item.get("height", 0.0)),
+                fixed=bool(item.get("fixed", False)),
             )
         )
     return blocks
