@@ -1,17 +1,41 @@
+"""Rule-based detection of six dark-pattern categories (Brignull taxonomy).
+
+Text heuristics run over the page's visible text; evidence is then anchored to
+page coordinates via the DOM snapshot so it can be drawn on the overlay.
+Layout heuristics (misdirection) and control state (pre-checked boxes) use the
+snapshot directly.
+"""
+
 from __future__ import annotations
 
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
+from typing import Any
+
+PATTERN_TYPES = (
+    "urgency",
+    "confirmshaming",
+    "pre_checked",
+    "hidden_costs",
+    "misdirection",
+    "forced_continuity",
+)
 
 TYPE_WEIGHTS: dict[str, float] = {
     "urgency": 1.5,
     "confirmshaming": 2.0,
-    "pre_checked": 1.0,
+    "pre_checked": 1.5,
     "hidden_costs": 2.0,
     "misdirection": 1.5,
     "forced_continuity": 1.5,
 }
+
+MAX_EVIDENCE_CHARS = 220
+MAX_MATCHES_PER_TYPE = 8
+MAX_BUTTON_LABEL_CHARS = 48
+MAX_BUTTON_ROW_GAP_PX = 700
+MIN_PX_PER_CHAR = 5.0
 
 
 @dataclass(frozen=True)
@@ -19,8 +43,7 @@ class DarkPatternMatch:
     pattern_type: str
     confidence: float
     evidence_text: str
-    dom_selector: str | None = None
-    bbox: dict | None = None
+    bbox: dict[str, float] | None = None
 
 
 @dataclass
@@ -28,395 +51,287 @@ class DarkPatternReport:
     patterns: list[DarkPatternMatch] = field(default_factory=list)
     score: float = 0.0
     summary: str = ""
+    counts: dict[str, int] = field(default_factory=dict)
 
 
 _URGENCY_STRONG = re.compile(
     r"(?i)\b(?:"
-    r"only\s+\d+\s+(?:left|remaining|in\s+stock|spots?|seats?)|"
-    r"expires?\s+(?:in|soon|today|tomorrow|midnight)|"
-    r"limited\s+(?:time|offer|quantity|stock|supply)|"
-    r"\b(?:hurry|act\s+now|buy\s+now|order\s+now|don'?t\s+miss|last\s+chance)\b|"
-    r"while\s+supplies\s+last|"
-    r"selling\s+fast|"
-    r"ends?\s+(?:tonight|today|soon|at\s+midnight)|"
-    r"(?:clock|countdown)\s+is\s+ticking|"
-    r"time\s+is\s+running\s+out"
+    r"only\s+\d+\s+(?:left|remaining|in\s+stock|spots?|seats?|rooms?)|"
+    r"expires?\s+(?:in|soon|today|tomorrow|at\s+midnight)|"
+    r"limited[\s-]+(?:time|offer|quantity|stock|supply)|"
+    r"hurry|act\s+now|order\s+now|don'?t\s+miss\s+out|last\s+chance|"
+    r"while\s+(?:supplies|stocks?)\s+last|selling\s+fast|"
+    r"(?:sale|offer|deal)\s+ends?\s+(?:tonight|today|soon|in)|"
+    r"time\s+is\s+running\s+out|"
+    r"\d+\s+(?:people|others)\s+(?:are\s+)?(?:viewing|looking\s+at)\s+this"
     r")\b"
 )
-
 _URGENCY_MODERATE = re.compile(
     r"(?i)\b(?:"
-    r"limited\s+availability|"
-    r"almost\s+gone|"
-    r"few\s+left|"
-    r"going\s+fast|"
-    r"offer\s+ends|"
-    r"deadline|"
-    r"today\s+only|"
-    r"flash\s+sale|"
-    r"countdown|"
-    r"\b(?:timer|ticking)\b"
+    r"limited\s+availability|almost\s+gone|few\s+left|going\s+fast|"
+    r"offer\s+ends|today\s+only|flash\s+sale|countdown|"
+    r"in\s+high\s+demand|booked\s+\d+\s+times"
     r")\b"
 )
-
-_URGENCY_TIME_LIKE = re.compile(
+_URGENCY_TIMER = re.compile(
     r"(?i)(?:\b\d{1,2}\s*:\s*\d{2}\s*:\s*\d{2}\b|"
     r"\b\d+\s*(?:hours?|hrs?|minutes?|mins?|seconds?|secs?)\s+(?:left|remaining)\b)"
 )
 
 _CONFIRM_STRONG = re.compile(
     r"(?i)(?:"
-    r"no\s+thanks?,?\s+i\s+(?:hate|don'?t\s+want|prefer\s+not|like\s+paying\s+more)|"
-    r"no,?\s+i\s+don'?t\s+want\s+(?:to\s+)?(?:save|the\s+savings|this\s+deal|discount|offers?)|"
-    r"i(?:'|’)?ll\s+pass\s+on\s+this\s+deal|"
-    r"no\s+thanks?,?\s+i\s+(?:enjoy\s+overpaying|love\s+full\s+price)|"
-    r"i\s+prefer\s+to\s+(?:pay\s+more|miss\s+out|lose\s+money)"
+    r"no\s+thanks?,?\s+i\s+(?:hate|don'?t\s+want|prefer\s+not|like\s+paying\s+more|enjoy\s+overpaying|love\s+full\s+price)[^.\n]{0,60}|"
+    r"no,?\s+i\s+don'?t\s+want\s+(?:to\s+)?(?:save|the\s+savings|this\s+deal|a\s+discount|discounts?|offers?)[^.\n]{0,40}|"
+    r"i\s+(?:prefer|want|choose)\s+to\s+(?:pay\s+(?:more|full\s+price)|miss\s+out|lose\s+money|stay\s+uninformed)[^.\n]{0,40}|"
+    r"i(?:'|’)?ll\s+pass\s+on\s+(?:this\s+deal|saving|the\s+discount)[^.\n]{0,40}"
     r")"
 )
-
 _CONFIRM_MODERATE = re.compile(
     r"(?i)(?:"
-    r"no\s+thanks?,?\s+i\s+(?:don'?t\s+need|am\s+not\s+interested)|"
-    r"maybe\s+later,?\s+i\s+(?:don'?t\s+mind\s+missing|am\s+ok\s+missing)|"
-    r"i\s+choose\s+to\s+(?:decline|refuse|skip)\s+(?:this\s+)?(?:offer|deal|savings?)|"
-    r"no,?\s+i\s+(?:want\s+to\s+pay\s+full\s+price|refuse\s+the\s+discount)|"
-    r"i(?:'|’)?ll\s+pass(?:\s+on\s+(?:this|savings?|the\s+deal))?"
+    r"no\s+thanks?,?\s+i\s+(?:don'?t\s+need|am\s+not\s+interested)[^.\n]{0,60}|"
+    r"maybe\s+later,?\s+i\s+(?:don'?t\s+mind\s+missing|am\s+ok\s+missing)[^.\n]{0,40}|"
+    r"i\s+(?:don'?t|do\s+not)\s+(?:want|care\s+about)\s+(?:to\s+)?(?:save|saving|savings|deals|discounts)[^.\n]{0,40}"
     r")"
 )
 
-_SIGNUP_NEAR = (
-    r"(?:\bsubscribe\b|\bnewsletter\b|promotional\s+emails?|marketing\s+emails?|"
-    r"terms\s*(?:and|&)\s*conditions?|\bi\s+agree\b|\bpayment\b|\bcheckout\b|"
-    r"order\s+summary|\bsign\s*up\b)"
-)
-
-_PRECHECK_NEAR_SIGNUP = re.compile(
-    r"(?is)(?:"
-    r"(?:pre[- ]?checked|pre[- ]?selected|\[\s*checkbox|(?<![a-z])checkbox\b|check\s*box\b|"
-    r"unless\s+you\s+uncheck|already\s+(?:checked|selected|opted\s*in|subscribed)|"
-    r"uncheck\s+(?:the\s+)?box\s+to\s+opt\s*out|by\s+default\s+(?:checked|selected|subscribed))"
-    r".{0,88}?"
-    + _SIGNUP_NEAR
-    + r"|"
-    + _SIGNUP_NEAR
-    + r".{0,88}?"
-    r"(?:pre[- ]?checked|pre[- ]?selected|\[\s*checkbox|(?<![a-z])checkbox\b|check\s*box\b|"
-    r"unless\s+you\s+uncheck|already\s+(?:checked|selected|opted\s*in|subscribed)|"
-    r"uncheck\s+(?:the\s+)?box\s+to\s+opt\s*out)"
-    r")"
-)
-
-_PRECHECK_SOFT = re.compile(
+_PRECHECK_TEXT = re.compile(
     r"(?i)(?:"
-    r"pre[- ]?checked|pre[- ]?selected|"
-    r"checkbox\s+is\s+(?:checked|selected|ticked)\s+by\s+default|"
+    r"pre[- ]?(?:checked|selected|ticked)|"
+    r"(?:checked|selected|ticked)\s+by\s+default|"
     r"you\s+will\s+be\s+subscribed\s+unless|"
-    r"subscribe(?:\s+to\s+our\s+newsletter)?\s*[,\.]?\s*(?:i\s+)?agree"
+    r"uncheck\s+(?:this\s+|the\s+)?box\s+(?:if\s+you|to\s+opt\s+out)"
     r")"
+)
+_PRECHECK_LABEL = re.compile(
+    r"(?i)(?:subscribe|newsletter|marketing|promotional|offers?|partners?|third[- ]part|"
+    r"share\s+my|insurance|protection\s+plan|donat|tip|add\s+.{0,20}for\s+(?:\$|€|£)|"
+    r"agree\s+to\s+receive|keep\s+me\s+(?:updated|informed|posted))"
 )
 
 _HIDDEN_FEE_PHRASES = re.compile(
     r"(?i)\b(?:"
-    r"additional\s+(?:fee|fees|charge|charges|cost|costs)|"
-    r"service\s+charge|processing\s+fee|convenience\s+fee|"
-    r"shipping\s+(?:not\s+included|extra|additional|separate)|"
-    r"taxes?\s+(?:not\s+included|extra|additional|may\s+apply)|"
-    r"hidden\s+(?:fee|fees|cost|charge)|"
-    r"extra\s+charges?\s+may\s+apply|"
-    r"fees?\s+apply|"
-    r"plus\s+(?:tax|shipping|handling)|"
-    r"does\s+not\s+include\s+(?:shipping|tax|fees?)"
+    r"additional\s+(?:fees?|charges?|costs?)|service\s+(?:fee|charge)|processing\s+fee|"
+    r"convenience\s+fee|handling\s+fee|resort\s+fee|booking\s+fee|"
+    r"shipping\s+(?:not\s+included|extra|calculated\s+at\s+checkout)|"
+    r"taxes?\s+(?:and\s+fees\s+)?(?:not\s+included|extra|additional|may\s+apply)|"
+    r"(?:extra|additional|other)\s+charges?\s+may\s+apply|fees?\s+(?:may\s+)?apply|"
+    r"plus\s+(?:applicable\s+)?(?:tax|taxes|shipping|handling|fees)|"
+    r"(?:does\s+not|doesn'?t)\s+include\s+(?:shipping|tax|taxes|fees?)|"
+    r"excl(?:\.|uding|usive\s+of)\s+(?:vat|tax|taxes|shipping)"
     r")\b"
-)
-
-_PRICE_LIKE = re.compile(
-    r"(?:(?:USD|EUR|GBP|CA\$|US\$|\$|€|£)\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?|"
-    r"\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*(?:USD|EUR|GBP|dollars?|euros?))\b",
-    re.IGNORECASE,
 )
 
 _FORCED_STRONG = re.compile(
     r"(?i)(?:"
-    r"free\s+trial(?:\s+ends|\s+then|\s+after)?|"
-    r"credit\s+card\s+required|card\s+required\s+for\s+trial|"
-    r"auto[- ]?renew(?:al)?|automatically\s+(?:renew|charged|billed)|"
-    r"billed\s+automatically|"
-    r"no\s+charge\s+until\s+(?:after|the\s+end)|"
-    r"after\s+(?:your\s+)?(?:free\s+)?trial\s+(?:ends?|you\s+will\s+be\s+charged)"
+    r"free\s+trial[^.\n]{0,80}?(?:then|after\s+which|billed|charged|\$|€|£)|"
+    r"(?:credit|debit)\s+card\s+required|card\s+required\s+for\s+(?:the\s+)?trial|"
+    r"auto(?:matic(?:ally)?)?[- ]?renew(?:s|al|ed)?|automatically\s+(?:charged|billed)|"
+    r"billed\s+(?:automatically|annually|monthly)\s+(?:until|unless)\s+(?:you\s+)?cancel|"
+    r"you\s+will\s+be\s+charged\s+(?:after|when|once)\s+(?:the|your)\s+trial"
     r")"
 )
-
 _FORCED_MODERATE = re.compile(
     r"(?i)(?:"
-    r"cancel\s+anytime(?:\s+before)?|"
-    r"renews?\s+automatically|"
-    r"subscription\s+(?:renews|continues)|"
-    r"recurring\s+billing|"
-    r"you\s+will\s+be\s+charged\s+after|"
-    r"trial\s+period\s+then\s+\$|"
-    r"first\s+\d+\s+(?:days?|months?)\s+free"
+    r"cancel\s+anytime|renews?\s+automatically|subscription\s+(?:renews|continues)|"
+    r"recurring\s+(?:billing|payment|charge)|first\s+\d+\s+(?:days?|months?|weeks?)\s+free"
     r")"
 )
 
 
-def _clip_confidence(x: float) -> float:
-    return max(0.0, min(1.0, x))
+def _clip(value: float) -> float:
+    return max(0.0, min(1.0, value))
 
 
-def _add_text_matches(
-    out: list[DarkPatternMatch],
-    pattern_type: str,
-    regex: re.Pattern[str],
-    text: str,
-    base_confidence: float,
-    dom_selector: str | None = None,
-) -> None:
+def _snippet(text: str) -> str:
+    text = " ".join(text.split())
+    if len(text) > MAX_EVIDENCE_CHARS:
+        return text[: MAX_EVIDENCE_CHARS - 3] + "..."
+    return text
+
+
+def _text_matches(
+    pattern_type: str, regex: re.Pattern[str], text: str, confidence: float
+) -> list[DarkPatternMatch]:
+    matches = []
     for m in regex.finditer(text):
-        snippet = m.group(0).strip()
+        snippet = _snippet(m.group(0))
         if len(snippet) < 3:
             continue
-        if len(snippet) > 220:
-            snippet = snippet[:217] + "..."
-        out.append(
-            DarkPatternMatch(
-                pattern_type=pattern_type,
-                confidence=_clip_confidence(base_confidence),
-                evidence_text=snippet,
-                dom_selector=dom_selector,
-                bbox=None,
-            )
-        )
+        matches.append(DarkPatternMatch(pattern_type, _clip(confidence), snippet))
+    return matches
 
 
 def _detect_urgency(text: str) -> list[DarkPatternMatch]:
-    matches: list[DarkPatternMatch] = []
-    _add_text_matches(matches, "urgency", _URGENCY_STRONG, text, 0.92)
-    _add_text_matches(matches, "urgency", _URGENCY_MODERATE, text, 0.55)
-    _add_text_matches(matches, "urgency", _URGENCY_TIME_LIKE, text, 0.5)
-    low_timer = re.compile(
-        r"(?i)\b(?:countdown|timer)\s*(?:widget|block|banner)?\b"
+    return (
+        _text_matches("urgency", _URGENCY_STRONG, text, 0.9)
+        + _text_matches("urgency", _URGENCY_MODERATE, text, 0.6)
+        + _text_matches("urgency", _URGENCY_TIMER, text, 0.5)
     )
-    _add_text_matches(matches, "urgency", low_timer, text, 0.35)
-    return matches
 
 
-def _detect_confirmshaming(text: str) -> list[DarkPatternMatch]:
-    matches: list[DarkPatternMatch] = []
-    _add_text_matches(matches, "confirmshaming", _CONFIRM_STRONG, text, 0.9)
-    _add_text_matches(matches, "confirmshaming", _CONFIRM_MODERATE, text, 0.55)
-    return matches
-
-
-def _detect_pre_checked(text: str) -> list[DarkPatternMatch]:
-    matches: list[DarkPatternMatch] = []
-    for m in _PRECHECK_NEAR_SIGNUP.finditer(text):
-        raw = m.group(0).strip()
-        snippet = raw if len(raw) <= 220 else raw[:217] + "..."
-        matches.append(
-            DarkPatternMatch(
-                pattern_type="pre_checked",
-                confidence=0.62,
-                evidence_text=snippet,
-                dom_selector=None,
-                bbox=None,
+def _detect_confirmshaming(text: str, controls: list[dict[str, Any]]) -> list[DarkPatternMatch]:
+    matches = _text_matches("confirmshaming", _CONFIRM_STRONG, text, 0.9)
+    matches += _text_matches("confirmshaming", _CONFIRM_MODERATE, text, 0.6)
+    for control in controls:
+        label = str(control.get("text") or control.get("aria_label") or "")
+        if not label:
+            continue
+        if _CONFIRM_STRONG.search(label) or _CONFIRM_MODERATE.search(label):
+            matches.append(
+                DarkPatternMatch("confirmshaming", 0.95, _snippet(label), _bbox(control))
             )
-        )
-    _add_text_matches(matches, "pre_checked", _PRECHECK_SOFT, text, 0.45)
+    return matches
+
+
+def _detect_pre_checked(text: str, checked_boxes: list[dict[str, Any]]) -> list[DarkPatternMatch]:
+    matches = []
+    for box in checked_boxes:
+        label = str(box.get("label", ""))
+        if _PRECHECK_LABEL.search(label):
+            matches.append(
+                DarkPatternMatch("pre_checked", 0.9, _snippet(label or "pre-checked option"), _bbox(box))
+            )
+    matches += _text_matches("pre_checked", _PRECHECK_TEXT, text, 0.5)
     return matches
 
 
 def _detect_hidden_costs(text: str) -> list[DarkPatternMatch]:
-    matches: list[DarkPatternMatch] = []
-    _add_text_matches(matches, "hidden_costs", _HIDDEN_FEE_PHRASES, text, 0.85)
-    prices = list(_PRICE_LIKE.finditer(text))
-    if len(prices) >= 2:
-        values: set[str] = set()
-        for m in prices[:12]:
-            norm = re.sub(r"[^\d.]", "", m.group(0))
-            if norm:
-                values.add(norm)
-        if len(values) >= 2:
-            span_start = prices[0].start()
-            span_end = prices[-1].end()
-            snippet = text[span_start:span_end].strip().replace("\n", " ")
-            if len(snippet) > 200:
-                snippet = snippet[:197] + "..."
-            conf = 0.5 if len(values) == 2 else min(0.88, 0.5 + 0.12 * (len(values) - 2))
-            matches.append(
-                DarkPatternMatch(
-                    pattern_type="hidden_costs",
-                    confidence=_clip_confidence(conf),
-                    evidence_text=snippet,
-                    dom_selector=None,
-                    bbox=None,
-                )
-            )
-    return matches
+    return _text_matches("hidden_costs", _HIDDEN_FEE_PHRASES, text, 0.8)
 
 
 def _detect_forced_continuity(text: str) -> list[DarkPatternMatch]:
-    matches: list[DarkPatternMatch] = []
-    _add_text_matches(matches, "forced_continuity", _FORCED_STRONG, text, 0.88)
-    _add_text_matches(matches, "forced_continuity", _FORCED_MODERATE, text, 0.52)
-    low = text.lower()
-    ft = re.search(r"\bfree\s+trial\b", low)
-    pay = re.search(
-        r"\b(?:credit\s+card|payment\s+method|card\s+on\s+file)\b",
-        low,
+    return _text_matches("forced_continuity", _FORCED_STRONG, text, 0.85) + _text_matches(
+        "forced_continuity", _FORCED_MODERATE, text, 0.5
     )
-    if ft and pay:
-        i, j = sorted((ft.start(), pay.start()))
-        if j - i <= 360:
-            span = text[i : min(len(text), max(ft.end(), pay.end()) + 40)].strip()
-            snippet = span if len(span) <= 220 else span[:217] + "..."
-            matches.append(
-                DarkPatternMatch(
-                    pattern_type="forced_continuity",
-                    confidence=0.72,
-                    evidence_text=snippet,
-                    dom_selector=None,
-                    bbox=None,
-                )
-            )
-    return matches
 
 
-def _box_area(b: dict) -> float:
-    w = float(b.get("width") or 0)
-    h = float(b.get("height") or 0)
-    return max(0.0, w * h)
+def _bbox(item: dict[str, Any]) -> dict[str, float]:
+    return {
+        "x": float(item.get("x", 0.0)),
+        "y": float(item.get("y", 0.0)),
+        "width": float(item.get("width", 0.0)),
+        "height": float(item.get("height", 0.0)),
+    }
 
 
-def _interactive_tag(tag: str) -> bool:
-    return tag.strip().lower() in {"button", "a"}
+def _area(item: dict[str, Any]) -> float:
+    return max(0.0, float(item.get("width", 0.0)) * float(item.get("height", 0.0)))
 
 
-def _detect_misdirection(boxes: list[dict]) -> list[DarkPatternMatch]:
-    if not boxes:
+def _has_visible_label(control: dict[str, Any]) -> bool:
+    """Screen-reader-only text survives innerText; a label needs room to render."""
+    text = str(control.get("text") or "")
+    if not text or len(text) > MAX_BUTTON_LABEL_CHARS:
+        return False
+    needed_px = min(len(text) * MIN_PX_PER_CHAR, 60.0)
+    return float(control.get("width", 0.0)) >= needed_px
+
+
+def _detect_misdirection(controls: list[dict[str, Any]]) -> list[DarkPatternMatch]:
+    """Flag rows where one button dwarfs a visibly labelled sibling (accept vs. decline)."""
+    sized = [c for c in controls if c.get("is_button") and _area(c) > 1.0 and _has_visible_label(c)]
+    if len(sized) < 2:
         return []
-    inter = [b for b in boxes if _interactive_tag(str(b.get("tag", "")))]
-    if len(inter) < 2:
-        return []
-    inter.sort(key=lambda b: (float(b.get("y", 0)), float(b.get("x", 0))))
-    clusters: list[list[dict]] = []
-
-    def _fits_row(cluster: list[dict], y: float) -> bool:
-        return any(abs(y - float(c.get("y", 0))) <= 22.0 for c in cluster)
-
-    for b in inter:
-        y = float(b.get("y", 0))
-        merged = False
-        for cl in clusters:
-            if _fits_row(cl, y):
-                cl.append(b)
-                merged = True
+    sized.sort(key=lambda c: (float(c.get("y", 0.0)), float(c.get("x", 0.0))))
+    rows: list[list[dict[str, Any]]] = []
+    for control in sized:
+        y = float(control.get("y", 0.0))
+        for row in rows:
+            if abs(y - float(row[0].get("y", 0.0))) <= 24.0:
+                row.append(control)
                 break
-        if not merged:
-            clusters.append([b])
-    matches: list[DarkPatternMatch] = []
-    for group in clusters:
-        if len(group) < 2:
+        else:
+            rows.append([control])
+
+    matches = []
+    for row in rows:
+        if len(row) < 2:
             continue
-        areas = [_box_area(b) for b in group]
-        areas = [a for a in areas if a > 1.0]
-        if len(areas) < 2:
+        largest = max(row, key=_area)
+        smallest = min(row, key=_area)
+        ratio = _area(largest) / _area(smallest)
+        if ratio < 3.5:
             continue
-        ratio = max(areas) / min(areas)
-        if ratio < 3.25:
+        gap = abs(float(largest.get("x", 0.0)) - float(smallest.get("x", 0.0)))
+        if gap > MAX_BUTTON_ROW_GAP_PX:
             continue
-        largest = max(group, key=_box_area)
-        smallest = min(group, key=_box_area)
-        conf = _clip_confidence(0.42 + min(0.38, (ratio - 3.25) * 0.06))
+        confidence = _clip(0.4 + min(0.4, (ratio - 3.5) * 0.05))
+        big_label = _snippet(str(largest.get("text", ""))) or "<unlabelled>"
+        small_label = _snippet(str(smallest.get("text", ""))) or "<unlabelled>"
         evidence = (
-            f"Interactive control size ratio ~{ratio:.1f}x in the same row "
-            f"(largest {int(_box_area(largest))}px² vs smallest {int(_box_area(smallest))}px²)"
+            f'"{big_label}" is {ratio:.1f}x larger than "{small_label}" in the same row'
         )
-        matches.append(
-            DarkPatternMatch(
-                pattern_type="misdirection",
-                confidence=conf,
-                evidence_text=evidence,
-                dom_selector=str(largest.get("tag")),
-                bbox={
-                    "tag": largest.get("tag"),
-                    "x": largest.get("x"),
-                    "y": largest.get("y"),
-                    "width": largest.get("width"),
-                    "height": largest.get("height"),
-                    "scroll_y": largest.get("scroll_y"),
-                },
-            )
-        )
+        matches.append(DarkPatternMatch("misdirection", confidence, evidence, _bbox(largest)))
     return matches
 
 
-def _dedupe_matches(matches: list[DarkPatternMatch]) -> list[DarkPatternMatch]:
-    seen: set[tuple[str, str, str | None]] = set()
-    out: list[DarkPatternMatch] = []
-    for m in matches:
-        key = (m.pattern_type, m.evidence_text[:120], m.dom_selector)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(m)
-    return out
+def _anchor(match: DarkPatternMatch, blocks: list[dict[str, Any]]) -> DarkPatternMatch:
+    if match.bbox is not None:
+        return match
+    needle = match.evidence_text.rstrip(".").lower()
+    if needle.endswith("..."):
+        needle = needle[:-3]
+    if len(needle) < 3:
+        return match
+    for block in blocks:
+        if needle in " ".join(str(block.get("text", "")).split()).lower():
+            return DarkPatternMatch(match.pattern_type, match.confidence, match.evidence_text, _bbox(block))
+    return match
 
 
-def _drop_subsumed_evidence(matches: list[DarkPatternMatch]) -> list[DarkPatternMatch]:
+def _dedupe(matches: list[DarkPatternMatch]) -> list[DarkPatternMatch]:
     by_type: dict[str, list[DarkPatternMatch]] = defaultdict(list)
     for m in matches:
         by_type[m.pattern_type].append(m)
-    resolved: list[DarkPatternMatch] = []
-    for ptype, group in by_type.items():
-        if ptype == "misdirection":
-            resolved.extend(group)
-            continue
-        ordered = sorted(group, key=lambda x: (-x.confidence, -len(x.evidence_text)))
-        kept: list[DarkPatternMatch] = []
-        for m in ordered:
-            if any(
-                m.evidence_text != k.evidence_text and m.evidence_text in k.evidence_text
-                for k in kept
-            ):
+    kept: list[DarkPatternMatch] = []
+    for group in by_type.values():
+        group.sort(key=lambda m: (-m.confidence, -len(m.evidence_text)))
+        seen: list[str] = []
+        for m in group:
+            key = m.evidence_text.lower()
+            if any(key == s or key in s for s in seen):
                 continue
+            seen.append(key)
             kept.append(m)
-        resolved.extend(kept)
-    return resolved
+            if len(seen) >= MAX_MATCHES_PER_TYPE:
+                break
+    kept.sort(key=lambda m: (PATTERN_TYPES.index(m.pattern_type), -m.confidence))
+    return kept
 
 
-def _compute_score(matches: list[DarkPatternMatch]) -> float:
-    raw = sum(m.confidence * TYPE_WEIGHTS.get(m.pattern_type, 1.0) for m in matches)
-    return min(10.0, raw)
+def _score(matches: list[DarkPatternMatch]) -> float:
+    return min(10.0, sum(m.confidence * TYPE_WEIGHTS[m.pattern_type] for m in matches))
 
 
-def _build_summary(matches: list[DarkPatternMatch], score: float) -> str:
+def _summary(matches: list[DarkPatternMatch], counts: dict[str, int], score: float) -> str:
     if not matches:
-        return "No dark pattern signals detected in the supplied text and layout data."
-    counts: dict[str, int] = defaultdict(int)
-    for m in matches:
-        counts[m.pattern_type] += 1
-    parts = [f"{k.replace('_', ' ')} ({v})" for k, v in sorted(counts.items())]
-    types_str = ", ".join(parts)
+        return "No dark-pattern signals were found in the page text or layout."
+    parts = [f"{k.replace('_', ' ')} ({v})" for k, v in counts.items()]
     return (
-        f"Detected {len(matches)} manipulative-design signal(s) across: {types_str}. "
-        f"Weighted concern score: {score:.1f}/10 (Brignull-style taxonomy heuristics)."
+        f"Detected {len(matches)} manipulative-design signal(s): {', '.join(parts)}. "
+        f"Weighted concern score {score:.1f}/10."
     )
 
 
-def detect_dark_patterns(
-    text: str,
-    bounding_boxes: list[dict] | None = None,
-) -> DarkPatternReport:
-    boxes = bounding_boxes or []
+def detect_dark_patterns(text: str, dom: dict[str, Any] | None = None) -> DarkPatternReport:
+    dom = dom or {}
+    controls = [r for r in dom.get("regions", []) if r.get("is_control")]
+    blocks = list(dom.get("text_blocks", [])) + controls
+    checked = list(dom.get("checked_boxes", []))
+
     collected: list[DarkPatternMatch] = []
-    collected.extend(_detect_urgency(text))
-    collected.extend(_detect_confirmshaming(text))
-    collected.extend(_detect_pre_checked(text))
-    collected.extend(_detect_hidden_costs(text))
-    collected.extend(_detect_forced_continuity(text))
-    collected.extend(_detect_misdirection(boxes))
-    collected = _dedupe_matches(collected)
-    collected = _drop_subsumed_evidence(collected)
-    score = min(10.0, _compute_score(collected))
-    summary = _build_summary(collected, score)
-    return DarkPatternReport(patterns=collected, score=score, summary=summary)
+    collected += _detect_urgency(text)
+    collected += _detect_confirmshaming(text, controls)
+    collected += _detect_pre_checked(text, checked)
+    collected += _detect_hidden_costs(text)
+    collected += _detect_forced_continuity(text)
+    collected += _detect_misdirection(controls)
+
+    matches = _dedupe([_anchor(m, blocks) for m in collected])
+    counts: dict[str, int] = {}
+    for m in matches:
+        counts[m.pattern_type] = counts.get(m.pattern_type, 0) + 1
+    score = _score(matches)
+    return DarkPatternReport(
+        patterns=matches, score=score, summary=_summary(matches, counts, score), counts=counts
+    )

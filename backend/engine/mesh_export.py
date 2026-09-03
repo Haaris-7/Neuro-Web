@@ -1,138 +1,96 @@
+"""Export the fsaverage5 pial surface as a GLB for the browser heatmap.
+
+Vertex order in each hemisphere node matches the fsaverage5 ordering used by
+TRIBE v2 predictions and the atlas, so per-vertex data can be applied directly.
+"""
+
 from __future__ import annotations
 
-import json
+import logging
+import threading
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
-try:
-    import nibabel as nib
-    from nibabel.nifti1 import intent_codes
-    from nilearn.datasets import fetch_atlas_surf_destrieux, fetch_surf_fsaverage
-    from nilearn.surface import load_surf_data
-    import trimesh
-except ImportError as e:
-    _OPTIONAL_IMPORT_ERROR: ImportError | None = e
-else:
-    _OPTIONAL_IMPORT_ERROR = None
-
 from config import settings
 
+logger = logging.getLogger(__name__)
 
-def _ensure_mesh_deps() -> None:
-    if _OPTIONAL_IMPORT_ERROR is not None:
-        raise ImportError(
-            "mesh_export requires nibabel, nilearn, and trimesh. "
-            "Install backend requirements (pip install -r backend/requirements.txt)."
-        ) from _OPTIONAL_IMPORT_ERROR
+HEMISPHERE_GAP_MM = 4.0
+NODE_NAMES = {"left": "left_hemisphere", "right": "right_hemisphere"}
+
+_lock = threading.Lock()
 
 
-def _load_surface_geometry(surface_path: str | Path) -> tuple[np.ndarray, np.ndarray]:
-    path = Path(surface_path)
-    path_str = str(path)
+def _load_gifti_geometry(path: str) -> tuple[np.ndarray, np.ndarray]:
+    import nibabel as nib
+    from nibabel.nifti1 import intent_codes
 
-    try:
-        img = nib.load(path_str)
-        if isinstance(img, nib.gifti.GiftiImage):
-            coords = faces = None
-            pt_code = intent_codes.code["NIFTI_INTENT_POINTSET"]
-            tri_code = intent_codes.code["NIFTI_INTENT_TRIANGLE"]
-            for da in img.darrays:
-                if da.intent == pt_code:
-                    coords = np.asarray(da.data, dtype=np.float64)
-                elif da.intent == tri_code:
-                    faces = np.asarray(da.data, dtype=np.int64)
-            if coords is None or faces is None:
-                raise ValueError(f"GIFTI mesh missing pointset or triangles: {path_str}")
-            return coords, faces
-    except Exception:
-        pass
-
-    try:
-        coords, faces = nib.freesurfer.read_geometry(path_str)
-        return coords.astype(np.float64), faces.astype(np.int64)
-    except Exception as e:
-        raise RuntimeError(f"Failed to load surface geometry from {path_str}") from e
+    img = nib.load(path)
+    coords = faces = None
+    for darray in img.darrays:
+        if darray.intent == intent_codes.code["NIFTI_INTENT_POINTSET"]:
+            coords = np.asarray(darray.data, dtype=np.float64)
+        elif darray.intent == intent_codes.code["NIFTI_INTENT_TRIANGLE"]:
+            faces = np.asarray(darray.data, dtype=np.int64)
+    if coords is None or faces is None:
+        raise ValueError(f"GIFTI mesh missing pointset or triangles: {path}")
+    return coords, faces
 
 
 def load_fsaverage5_surfaces(
-    cache_dir: str | None = None,
-) -> tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]:
-    _ensure_mesh_deps()
-    data_root = Path(cache_dir if cache_dir is not None else settings.MODEL_CACHE_DIR).resolve()
-    data_root.mkdir(parents=True, exist_ok=True)
-    fs = fetch_surf_fsaverage(mesh="fsaverage5", data_dir=str(data_root))
-    lh = _load_surface_geometry(fs.pial_left)
-    rh = _load_surface_geometry(fs.pial_right)
-    return lh, rh
+    surface: str = "pial",
+) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    from nilearn.datasets import fetch_surf_fsaverage
 
-
-def _hemisphere_offset_x(
-    lh_vertices: np.ndarray, rh_vertices: np.ndarray, gap_mm: float = 5.0
-) -> float:
-    lh_xmax = float(np.max(lh_vertices[:, 0]))
-    rh_xmin = float(np.min(rh_vertices[:, 0]))
-    return lh_xmax - rh_xmin + gap_mm
-
-
-def _build_region_sidecar(data_dir: str) -> dict[str, Any]:
-    atlas = fetch_atlas_surf_destrieux(data_dir=data_dir)
-    left_ids = np.asarray(load_surf_data(atlas.map_left), dtype=np.int64).tolist()
-    right_ids = np.asarray(load_surf_data(atlas.map_right), dtype=np.int64).tolist()
+    fs = fetch_surf_fsaverage(mesh="fsaverage5")
     return {
-        "atlas": "destrieux_surface",
-        "vertex_index_to_region_id": {
-            "left_hemisphere": left_ids,
-            "right_hemisphere": right_ids,
-        },
-        "labels": list(atlas.labels),
+        "left": _load_gifti_geometry(fs[f"{surface}_left"]),
+        "right": _load_gifti_geometry(fs[f"{surface}_right"]),
     }
 
 
-def export_brain_mesh(output_path: str, cache_dir: str | None = None) -> str:
-    _ensure_mesh_deps()
-    out = Path(output_path)
-    if out.suffix.lower() != ".glb":
-        out = out / "fsaverage5.glb"
-    out = out.resolve()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    json_path = out.with_suffix(".json")
-    data_dir = str(Path(cache_dir if cache_dir is not None else settings.MODEL_CACHE_DIR).resolve())
+def mesh_path(cache_dir: str | None = None) -> Path:
+    root = Path(cache_dir if cache_dir is not None else settings.MODEL_CACHE_DIR).resolve()
+    return root / "mesh" / "fsaverage5_pial.glb"
 
-    if out.exists():
-        if not json_path.exists():
-            try:
-                sidecar = _build_region_sidecar(data_dir=data_dir)
-                json_path.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
-            except Exception:
-                pass
-        return str(out)
 
-    (lh_vertices, lh_faces), (rh_vertices, rh_faces) = load_fsaverage5_surfaces(cache_dir=cache_dir)
+def ensure_brain_mesh(cache_dir: str | None = None) -> Path:
+    """Build the GLB on first use and return its path."""
+    out = mesh_path(cache_dir)
+    with _lock:
+        if out.is_file():
+            return out
+        try:
+            import trimesh
+        except ImportError as exc:
+            raise ImportError("trimesh is required to export the brain mesh") from exc
 
-    offset = _hemisphere_offset_x(lh_vertices, rh_vertices)
-    rh_shifted = rh_vertices.copy()
-    rh_shifted[:, 0] += offset
+        surfaces = load_fsaverage5_surfaces()
+        (lh_vertices, lh_faces) = surfaces["left"]
+        (rh_vertices, rh_faces) = surfaces["right"]
+        shift = HEMISPHERE_GAP_MM / 2.0
+        lh_shifted = lh_vertices.copy()
+        rh_shifted = rh_vertices.copy()
+        lh_shifted[:, 0] -= shift
+        rh_shifted[:, 0] += shift
 
-    lh_mesh = trimesh.Trimesh(vertices=lh_vertices, faces=lh_faces, process=False)
-    rh_mesh = trimesh.Trimesh(vertices=rh_shifted, faces=rh_faces, process=False)
-    lh_mesh.vertex_normals
-    rh_mesh.vertex_normals
+        scene = trimesh.Scene()
+        for name, vertices, faces in (
+            (NODE_NAMES["left"], lh_shifted, lh_faces),
+            (NODE_NAMES["right"], rh_shifted, rh_faces),
+        ):
+            mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+            scene.add_geometry(mesh, node_name=name, geom_name=name)
 
-    scene = trimesh.Scene()
-    scene.add_geometry(lh_mesh, geom_name="left_hemisphere")
-    scene.add_geometry(rh_mesh, geom_name="right_hemisphere")
-    scene.export(str(out))
-
-    try:
-        sidecar = _build_region_sidecar(data_dir)
-        json_path.write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
-    except Exception:
-        if json_path.exists():
-            json_path.unlink(missing_ok=True)
-        if out.exists():
-            out.unlink(missing_ok=True)
-        raise
-
-    return str(out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_suffix(".tmp.glb")
+        scene.export(str(tmp), file_type="glb")
+        tmp.replace(out)
+        logger.info(
+            "Exported fsaverage5 mesh (%d + %d vertices) to %s",
+            len(lh_vertices),
+            len(rh_vertices),
+            out,
+        )
+        return out

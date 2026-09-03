@@ -1,48 +1,32 @@
 import { NextRequest } from "next/server";
+import { BACKEND_URL, sseHeaders } from "@/lib/backend";
+
+export const dynamic = "force-dynamic";
 
 export async function POST(
   request: NextRequest,
-  context: { params: Promise<{ id: string }> },
+  { params }: { params: Promise<{ id: string }> },
 ) {
-  const { id } = await context.params;
+  const { id } = await params;
   const body = await request.text();
-  const url = `http://localhost:8000/chat/${encodeURIComponent(id)}`;
-
+  let upstream: Response;
   try {
-    const res = await fetch(url, {
+    upstream = await fetch(`${BACKEND_URL}/chat/${encodeURIComponent(id)}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
       body,
-    });
-
-    if (!res.ok) {
-      const text = await res.text();
-      return new Response(text, {
-        status: res.status,
-        headers: { "Content-Type": res.headers.get("content-type") || "application/json" },
-      });
-    }
-
-    if (res.headers.get("content-type")?.includes("text/event-stream")) {
-      return new Response(res.body, {
-        status: 200,
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-        },
-      });
-    }
-
-    const text = await res.text();
-    return new Response(text, {
-      status: 200,
-      headers: { "Content-Type": res.headers.get("content-type") || "application/json" },
+      cache: "no-store",
+      signal: request.signal,
     });
   } catch {
-    return new Response(
-      JSON.stringify({ error: "Chat service unavailable" }),
-      { status: 503, headers: { "Content-Type": "application/json" } },
-    );
+    return Response.json({ detail: "Chat service unavailable" }, { status: 503 });
   }
+  if (!upstream.ok || !upstream.body) {
+    const text = await upstream.text();
+    return new Response(text, {
+      status: upstream.status,
+      headers: { "Content-Type": upstream.headers.get("content-type") ?? "application/json" },
+    });
+  }
+  return new Response(upstream.body, { headers: sseHeaders(upstream) });
 }

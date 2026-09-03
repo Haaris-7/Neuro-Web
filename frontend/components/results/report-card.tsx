@@ -1,25 +1,25 @@
 "use client";
 
 import { useMemo } from "react";
-import type {
-  ScoreReport,
-  DarkPatternReport,
-  TemplateSummaries,
-  DarkPatternType,
+import {
+  GROUP_COLORS,
+  GROUP_LABELS,
+  type DarkPatternReport,
+  type DarkPatternType,
+  type ReportMetadata,
+  type ScoreReport,
+  type TemplateSummaries,
 } from "@/lib/types";
 
 interface ReportCardProps {
   scores: ScoreReport;
   darkPatterns: DarkPatternReport;
   summaries: TemplateSummaries;
-  url: string;
-  captureDate: string;
-  hasEnhancedReport?: boolean;
+  metadata: ReportMetadata;
 }
 
 const GAUGE_RADIUS = 54;
 const GAUGE_STROKE = 7;
-const GAUGE_CIRCUMFERENCE = 2 * Math.PI * GAUGE_RADIUS;
 
 function CircularGauge({
   value,
@@ -182,25 +182,18 @@ const DARK_PATTERN_META: Record<
   },
 };
 
-export function ReportCard({
-  scores,
-  darkPatterns,
-  summaries,
-  url,
-  captureDate,
-  hasEnhancedReport,
-}: ReportCardProps) {
+export function ReportCard({ scores, darkPatterns, summaries, metadata }: ReportCardProps) {
   const hostname = useMemo(() => {
     try {
-      return new URL(url).hostname;
+      return new URL(metadata.url).hostname;
     } catch {
-      return url;
+      return metadata.url;
     }
-  }, [url]);
+  }, [metadata.url]);
 
   const dateStr = useMemo(() => {
     try {
-      return new Date(captureDate).toLocaleDateString("en-US", {
+      return new Date(metadata.capture_date).toLocaleDateString("en-US", {
         year: "numeric",
         month: "short",
         day: "numeric",
@@ -208,12 +201,23 @@ export function ReportCard({
         minute: "2-digit",
       });
     } catch {
-      return captureDate;
+      return metadata.capture_date;
     }
-  }, [captureDate]);
+  }, [metadata.capture_date]);
+
+  const isMock = metadata.inference_backend === "mock";
 
   return (
     <div className="space-y-8">
+      {isMock && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-950/40 px-4 py-3 text-xs leading-relaxed text-amber-200">
+          <strong>Synthetic results.</strong> This analysis was produced with{" "}
+          <code className="rounded bg-amber-900/50 px-1">INFERENCE_BACKEND=mock</code>, which
+          generates placeholder brain activity without running TRIBE v2. Use it to exercise the
+          pipeline and interface only.
+        </div>
+      )}
+
       {/* Hero score */}
       <div className="flex flex-col items-center py-4">
         <div className="relative">
@@ -245,16 +249,18 @@ export function ReportCard({
         <p className="mt-4 max-w-md text-center text-sm leading-relaxed text-slate-400">
           {summaries.overall}
         </p>
-        <div className="mt-3 flex items-center gap-3 text-xs text-slate-600">
+        <div className="mt-3 flex flex-wrap items-center justify-center gap-3 text-xs text-slate-600">
           <span>{hostname}</span>
           <span className="h-1 w-1 rounded-full bg-slate-700" />
           <span>{dateStr}</span>
-          {hasEnhancedReport && (
+          <span className="h-1 w-1 rounded-full bg-slate-700" />
+          <span>
+            {metadata.n_timesteps} timesteps · {metadata.n_vertices.toLocaleString()} vertices
+          </span>
+          {metadata.modalities.length > 0 && (
             <>
               <span className="h-1 w-1 rounded-full bg-slate-700" />
-              <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-violet-400">
-                AI-enhanced
-              </span>
+              <span>{metadata.modalities.join(" + ")}</span>
             </>
           )}
         </div>
@@ -398,62 +404,81 @@ export function ReportCard({
         </div>
       )}
 
+      {/* Network breakdown */}
+      {scores.network_breakdown.length > 0 && (
+        <div className="animate-stagger-fade" style={{ animationDelay: "700ms" }}>
+          <h3 className="mb-1 text-sm font-semibold text-slate-200">Functional Networks</h3>
+          <p className="mb-4 text-xs text-slate-500">
+            Mean predicted activation per network, scaled against all cortical regions of this
+            page (5 = typical).
+          </p>
+          <div className="space-y-2.5">
+            {scores.network_breakdown.map((net) => {
+              const color = GROUP_COLORS[net.network] ?? "#64748b";
+              return (
+                <div key={net.network} className="group flex items-center gap-3">
+                  <span
+                    className="w-24 truncate text-right text-[11px] font-medium text-slate-400"
+                    title={net.regions.join(", ")}
+                  >
+                    {GROUP_LABELS[net.network] ?? net.network}
+                  </span>
+                  <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-800/60">
+                    <div
+                      className="h-full rounded-full"
+                      style={{
+                        width: `${Math.min(net.normalized_score / 10, 1) * 100}%`,
+                        background: color,
+                        opacity: 0.85,
+                      }}
+                    />
+                  </div>
+                  <span className="w-8 text-right font-mono text-[11px]" style={{ color }}>
+                    {net.normalized_score.toFixed(1)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Region breakdown */}
       {scores.region_breakdown.length > 0 && (
-        <div
-          className="animate-stagger-fade"
-          style={{ animationDelay: "700ms" }}
-        >
-          <h3 className="mb-4 text-sm font-semibold text-slate-200">
-            Brain Region Activity
-          </h3>
+        <div className="animate-stagger-fade" style={{ animationDelay: "800ms" }}>
+          <h3 className="mb-1 text-sm font-semibold text-slate-200">Most Active Regions</h3>
+          <p className="mb-4 text-xs text-slate-500">
+            Desikan–Killiany parcels ranked by predicted activation.
+          </p>
           <div className="space-y-2">
-            {scores.region_breakdown
-              .sort((a, b) => b.normalized_score - a.normalized_score)
-              .slice(0, 8)
-              .map((region) => {
-                const groupColors: Record<string, string> = {
-                  visual: "#22d3ee",
-                  attention: "#3b82f6",
-                  emotional: "#8b5cf6",
-                  language: "#34d399",
-                  default_mode: "#64748b",
-                };
-                const color =
-                  groupColors[region.functional_group] || "#64748b";
-                const pct =
-                  Math.min(region.normalized_score / 10, 1) * 100;
-
-                return (
-                  <div
-                    key={region.region_name}
-                    className="group flex items-center gap-3"
+            {scores.region_breakdown.slice(0, 8).map((region) => {
+              const color = region.functional_group
+                ? GROUP_COLORS[region.functional_group]
+                : "#64748b";
+              return (
+                <div key={region.region_name} className="group flex items-center gap-3">
+                  <span
+                    className="w-32 truncate text-right text-[11px] font-medium text-slate-500 group-hover:text-slate-400"
+                    title={region.region_name}
                   >
-                    <span
-                      className="w-20 truncate text-right text-[11px] font-medium text-slate-500 group-hover:text-slate-400"
-                      title={region.region_name}
-                    >
-                      {region.region_name}
-                    </span>
-                    <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-800/60">
-                      <div
-                        className="h-full rounded-full"
-                        style={{
-                          width: `${pct}%`,
-                          background: color,
-                          opacity: 0.8,
-                        }}
-                      />
-                    </div>
-                    <span
-                      className="w-8 text-right font-mono text-[11px]"
-                      style={{ color }}
-                    >
-                      {region.normalized_score.toFixed(1)}
-                    </span>
+                    {region.region_name}
+                  </span>
+                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-800/60">
+                    <div
+                      className="h-full rounded-full"
+                      style={{
+                        width: `${Math.min(region.normalized_score / 10, 1) * 100}%`,
+                        background: color,
+                        opacity: 0.8,
+                      }}
+                    />
                   </div>
-                );
-              })}
+                  <span className="w-8 text-right font-mono text-[11px]" style={{ color }}>
+                    {region.normalized_score.toFixed(1)}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -462,10 +487,10 @@ export function ReportCard({
       <div className="rounded-xl border border-slate-800/40 bg-slate-900/20 px-4 py-3">
         <p className="text-[10px] leading-relaxed text-slate-600">
           <strong className="text-slate-500">Scientific disclaimer:</strong>{" "}
-          Brain activation predictions are generated by Meta&apos;s TRIBE v2 model
-          and represent statistical approximations, not direct measurements.
-          Scores are relative and should not be interpreted as clinical
-          assessments. Powered by TRIBE v2 on fsaverage5 cortical mesh.
+          Brain activation is predicted by Meta&apos;s TRIBE v2 encoding model for an
+          average subject on the fsaverage5 cortical mesh; it is a statistical approximation,
+          not a measurement from real viewers. Scores are relative to this page and are not
+          clinical assessments. Dark patterns come from rule-based text and layout heuristics.
         </p>
       </div>
     </div>

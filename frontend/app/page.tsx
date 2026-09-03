@@ -2,13 +2,14 @@
 
 import { useCallback, useState } from "react";
 import { useRouter } from "next/navigation";
+import { BackendStatus } from "@/components/backend-status";
 import { UrlInput, validateHttpUrl } from "@/components/url-input";
 
 const FEATURES = [
   {
     title: "Brain Mapping",
     description:
-      "Predict cortical activation patterns using Meta's TRIBE v2 foundation model on your local GPU.",
+      "Meta's TRIBE v2 predicts fMRI-like responses across 20,000+ cortical vertices from a scrolling recording of the page, on your local GPU.",
     icon: (
       <svg
         className="h-7 w-7"
@@ -27,7 +28,7 @@ const FEATURES = [
   {
     title: "Dark Pattern Detection",
     description:
-      "Rules-based classifiers flag urgency tricks, confirmshaming, hidden costs, and misdirection.",
+      "Rule-based detectors flag urgency, confirmshaming, pre-checked consent, hidden costs, misdirection and forced continuity.",
     icon: (
       <svg
         className="h-7 w-7"
@@ -139,6 +140,7 @@ export default function Home() {
             loading={loading}
             error={error}
           />
+          <BackendStatus />
         </div>
 
         <section className="mx-auto mt-8 grid w-full max-w-4xl grid-cols-1 gap-5 pb-20 sm:grid-cols-3">

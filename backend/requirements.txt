@@ -1,21 +1,24 @@
+# API server and job pipeline
 fastapi
 uvicorn[standard]
 aiosqlite
 python-dotenv
-playwright
 pydantic
 sse-starlette
+httpx
+playwright
 
-# Phase 2: TRIBE v2 inference
-torch>=2.5.0
-numpy>=1.26.0
+# Scoring engine, atlas and mesh export
+numpy>=2.2,<2.3
 pandas>=2.1.0
-huggingface_hub>=0.27.0
-
-# Phase 3: Core engine — deterministic scoring & analytics
+scipy>=1.12.0
 nibabel>=5.2.0
 nilearn>=0.10.0
-scipy>=1.12.0
 trimesh>=4.0.0
 matplotlib>=3.8.0
 Pillow>=10.0.0
+huggingface_hub>=0.27.0
+
+# TRIBE v2 pins torch>=2.5.1,<2.7 and numpy==2.2.6. Install a CUDA build of
+# torch for your driver first (see scripts/setup.sh), then `make setup-tribe`.
+torch>=2.5.1,<2.7

@@ -320,7 +320,7 @@ write_env() {
   fi
 
   echo ""
-  echo -e "  ${BOLD}LLM API Key${RESET} ${DIM}(optional — enables AI chatbot + enhanced reports)${RESET}"
+  echo -e "  ${BOLD}LLM API Key${RESET} ${DIM}(optional — enables the report chatbot)${RESET}"
   echo -e "  ${DIM}Supports OpenAI or Anthropic API keys${RESET}"
   echo ""
 
@@ -409,10 +409,11 @@ setup_backend() {
     echo -e "  ${DIM}  Run 'nvidia-smi' to see your driver's CUDA version${RESET}"
     echo ""
     local cuda_ver
-    cuda_ver=$(ask_input "CUDA version (12.4 / 12.1 / 11.8)" "12.4")
+    cuda_ver=$(ask_input "CUDA version (12.6 / 12.4 / 12.1 / 11.8)" "12.6")
 
     local torch_index=""
     case "$cuda_ver" in
+      12.6*) torch_index="https://download.pytorch.org/whl/cu126" ;;
       12.4*) torch_index="https://download.pytorch.org/whl/cu124" ;;
       12.1*) torch_index="https://download.pytorch.org/whl/cu121" ;;
       11.8*) torch_index="https://download.pytorch.org/whl/cu118" ;;
@@ -424,12 +425,12 @@ setup_backend() {
 
     if [[ -n "$torch_index" ]]; then
       run_with_spinner "Installing PyTorch (CUDA $cuda_ver)" \
-        "$pip" install "torch>=2.5.0" --index-url "$torch_index" || {
+        "$pip" install "torch>=2.5.1,<2.7" --index-url "$torch_index" || {
           warn "CUDA PyTorch install failed — falling back to default"
-          run_with_spinner "Installing PyTorch (default)" "$pip" install "torch>=2.5.0" || true
+          run_with_spinner "Installing PyTorch (default)" "$pip" install "torch>=2.5.1,<2.7" || true
         }
     else
-      run_with_spinner "Installing PyTorch" "$pip" install "torch>=2.5.0" || true
+      run_with_spinner "Installing PyTorch" "$pip" install "torch>=2.5.1,<2.7" || true
     fi
   else
     if [[ "$os" == "macos" ]]; then
@@ -438,7 +439,7 @@ setup_backend() {
     else
       info "No NVIDIA GPU — installing CPU-only PyTorch"
     fi
-    run_with_spinner "Installing PyTorch (CPU)" "$pip" install "torch>=2.5.0" || {
+    run_with_spinner "Installing PyTorch (CPU)" "$pip" install "torch>=2.5.1,<2.7" || {
       warn "PyTorch installation failed — you can install it manually later"
     }
   fi
@@ -666,6 +667,8 @@ print_summary() {
   echo -e "  ${DIM}Start the app:${RESET}        ${BOLD}make run${RESET}"
   echo -e "  ${DIM}Start backend only:${RESET}   ${BOLD}make run-backend${RESET}"
   echo -e "  ${DIM}Start frontend only:${RESET}  ${BOLD}make run-frontend${RESET}"
+  echo -e "  ${DIM}No GPU (synthetic):${RESET}   ${BOLD}make run-mock${RESET}"
+  echo -e "  ${DIM}Prefetch atlas/mesh:${RESET}  ${BOLD}make prefetch${RESET}"
   echo -e "  ${DIM}Check GPU:${RESET}            ${BOLD}make check-gpu${RESET}"
   echo -e "  ${DIM}Clean data:${RESET}           ${BOLD}make clean${RESET}"
   echo ""

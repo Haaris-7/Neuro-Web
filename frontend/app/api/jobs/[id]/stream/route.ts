@@ -1,35 +1,31 @@
 import { NextRequest } from "next/server";
+import { BACKEND_URL, sseHeaders } from "@/lib/backend";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(
   request: NextRequest,
-  context: { params: Promise<{ id: string }> },
+  { params }: { params: Promise<{ id: string }> },
 ) {
-  const { id } = await context.params;
+  const { id } = await params;
   const lastId = request.headers.get("last-event-id");
-  const upstream = await fetch(
-    `http://localhost:8000/jobs/${encodeURIComponent(id)}/stream`,
-    {
+  let upstream: Response;
+  try {
+    upstream = await fetch(`${BACKEND_URL}/jobs/${encodeURIComponent(id)}/stream`, {
       headers: {
         Accept: "text/event-stream",
         ...(lastId ? { "Last-Event-ID": lastId } : {}),
       },
       cache: "no-store",
-    },
-  );
-
+      signal: request.signal,
+    });
+  } catch {
+    return new Response("Backend unavailable", { status: 503 });
+  }
   if (!upstream.ok || !upstream.body) {
     return new Response(upstream.statusText || "Upstream error", {
       status: upstream.status || 502,
     });
   }
-
-  return new Response(upstream.body, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-    },
-  });
+  return new Response(upstream.body, { headers: sseHeaders(upstream) });
 }

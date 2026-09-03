@@ -4,7 +4,13 @@ import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
-import type { AnalysisReport } from "@/lib/types";
+import {
+  jobFileUrl,
+  type AnalysisReport,
+  type AtlasData,
+  type HealthResponse,
+} from "@/lib/types";
+import type { ColormapName } from "@/lib/colormaps";
 import { ReportCard } from "@/components/results/report-card";
 import { WebsiteOverlay } from "@/components/results/website-overlay";
 import { ScrollTimeline } from "@/components/results/scroll-timeline";
@@ -120,9 +126,9 @@ export default function ResultsPage() {
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("report");
   const [chatOpen, setChatOpen] = useState(false);
-  const [llmAvailable, setLlmAvailable] = useState(false);
+  const [health, setHealth] = useState<HealthResponse | null>(null);
   const [webglAvailable, setWebglAvailable] = useState(true);
-  const [atlasData, setAtlasData] = useState<Record<string, unknown> | null>(null);
+  const [atlas, setAtlas] = useState<AtlasData | null>(null);
 
   const fetchReport = useCallback(async () => {
     if (!jobId) return;
@@ -154,48 +160,42 @@ export default function ResultsPage() {
   useEffect(() => {
     try {
       const canvas = document.createElement("canvas");
-      const gl =
-        canvas.getContext("webgl2") || canvas.getContext("webgl");
+      const options = { failIfMajorPerformanceCaveat: true };
+      const gl = canvas.getContext("webgl2", options) || canvas.getContext("webgl", options);
       setWebglAvailable(!!gl);
+      (gl as WebGLRenderingContext | null)?.getExtension("WEBGL_lose_context")?.loseContext();
     } catch {
       setWebglAvailable(false);
     }
   }, []);
 
   useEffect(() => {
-    fetch("/api/jobs/" + encodeURIComponent(jobId))
-      .then((r) => r.json())
-      .then((job) => {
-        const meta = job?.capture_metadata;
-        if (meta?.scoring?.llm_enhanced || meta?.llm_available) {
-          setLlmAvailable(true);
-        }
-      })
-      .catch(() => {});
-  }, [jobId]);
+    fetch("/api/health")
+      .then((r) => (r.ok ? (r.json() as Promise<HealthResponse>) : null))
+      .then((data) => setHealth(data))
+      .catch(() => setHealth(null));
+  }, []);
 
   useEffect(() => {
     if (!webglAvailable) return;
-    fetch("/api/mesh")
-      .then(async (res) => {
-        if (res.ok) {
-          const atlasUrl = `/api/jobs/${encodeURIComponent(jobId)}/files/desikan_killiany_fsaverage5.json`;
-          const atlasRes = await fetch(atlasUrl).catch(() => null);
-          if (atlasRes?.ok) {
-            const data = await atlasRes.json();
-            setAtlasData(data);
-          }
-        }
-      })
-      .catch(() => {});
-  }, [jobId, webglAvailable]);
+    fetch("/api/atlas")
+      .then((r) => (r.ok ? (r.json() as Promise<AtlasData>) : null))
+      .then((data) => setAtlas(data))
+      .catch(() => setAtlas(null));
+  }, [webglAvailable]);
 
-  const screenshotUrl = useMemo(
-    () => `/api/jobs/${encodeURIComponent(jobId)}/files/page.png`,
-    [jobId],
+  const screenshotUrl = useMemo(() => jobFileUrl(jobId, "page.png"), [jobId]);
+  const activationUrl = useMemo(
+    () => (report ? jobFileUrl(jobId, report.vertex_activation.file) : ""),
+    [jobId, report],
   );
-
-  const meshUrl = "/api/mesh";
+  const timeLabels = useMemo(
+    () => report?.timeline.series.map((p) => p.time_s) ?? [],
+    [report],
+  );
+  const colormap = (report?.metadata.colormap as ColormapName | undefined) ?? "viridis";
+  const llmAvailable = health?.llm_available ?? false;
+  const isMock = report?.metadata.inference_backend === "mock";
 
   const hostname = useMemo(() => {
     if (!report) return "";
@@ -234,6 +234,11 @@ export default function ResultsPage() {
                 <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">
                   Complete
                 </span>
+                {isMock && (
+                  <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-300">
+                    Mock inference
+                  </span>
+                )}
               </div>
             )}
           </div>
@@ -313,34 +318,30 @@ export default function ResultsPage() {
                   scores={report.scores}
                   darkPatterns={report.dark_patterns}
                   summaries={report.template_summaries}
-                  url={report.url}
-                  captureDate={report.metadata.capture_date}
-                  hasEnhancedReport={false}
+                  metadata={report.metadata}
                 />
               </div>
             )}
 
             {/* Tab: Brain Heatmap */}
             {activeTab === "brain" && (
-              <div className="h-[calc(100vh-12rem)]">
+              <div className="h-[calc(100vh-12rem)] min-h-[560px]">
                 {webglAvailable ? (
                   <BrainHeatmap
-                    meshUrl={meshUrl}
+                    meshUrl="/api/mesh"
+                    activationUrl={activationUrl}
+                    activationMeta={report.vertex_activation}
+                    atlas={atlas}
                     regionBreakdown={report.scores.region_breakdown}
-                    atlasData={atlasData as never}
-                    colormap={
-                      (report.metadata.colormap as "viridis" | "plasma" | "inferno" | "magma") ||
-                      "viridis"
-                    }
+                    timeLabels={timeLabels}
+                    colormap={colormap}
+                    onUnavailable={() => setWebglAvailable(false)}
                   />
                 ) : (
                   <BrainHeatmapFallback
                     projectionPaths={report.projection_paths}
                     jobId={jobId}
-                    colormap={
-                      (report.metadata.colormap as "viridis" | "plasma" | "inferno" | "magma") ||
-                      "viridis"
-                    }
+                    reason="hardware-accelerated WebGL is unavailable in this browser"
                   />
                 )}
               </div>
@@ -348,7 +349,7 @@ export default function ResultsPage() {
 
             {/* Tab: Website Overlay */}
             {activeTab === "overlay" && (
-              <div className="h-[calc(100vh-12rem)]">
+              <div className="h-[calc(100vh-12rem)] min-h-[560px]">
                 <WebsiteOverlay
                   screenshotUrl={screenshotUrl}
                   overlay={report.overlay}
@@ -360,10 +361,11 @@ export default function ResultsPage() {
 
             {/* Tab: Scroll Timeline */}
             {activeTab === "timeline" && (
-              <div className="h-[calc(100vh-12rem)]">
+              <div className="h-[calc(100vh-12rem)] min-h-[560px]">
                 <ScrollTimeline
                   timeline={report.timeline}
                   darkPatterns={report.dark_patterns.patterns}
+                  viewportHeight={report.metadata.viewport_h || 900}
                 />
               </div>
             )}
@@ -378,7 +380,7 @@ export default function ResultsPage() {
           report={report}
           isOpen={chatOpen}
           onClose={() => setChatOpen(false)}
-          provider="AI"
+          provider={health?.llm_provider ?? "LLM"}
         />
       )}
     </div>
