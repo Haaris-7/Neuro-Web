@@ -1,41 +1,25 @@
+"""Deterministic 0-10 scores derived from TRIBE v2 vertex predictions.
+
+Predictions are z-scored fMRI-like responses. A network's raw activation is
+placed on a 0-10 scale by comparing it with the distribution of activation
+across all cortical regions of the same capture, so a score of 5 means "typical
+for this page" and the tails mark networks that stand out.
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
-from engine.atlas import Atlas, load_atlas
+from engine.atlas import Atlas
 
-FUNCTIONAL_GROUPS = (
-    "visual",
-    "attention",
-    "emotional",
-    "language",
-    "default_mode",
-)
-
+FUNCTIONAL_GROUPS = ("visual", "attention", "emotional", "language", "default_mode")
 ATTENTION_GROUPS = ("visual", "attention")
-
-__all__ = [
-    "ScoreReport",
-    "compute_scores",
-    "compute_attention_score",
-    "compute_emotion_score",
-    "compute_impact_score",
-    "compute_temporal_variance",
-    "compute_region_breakdown",
-    "FUNCTIONAL_GROUPS",
-    "load_atlas",
-]
-
-
-def _combined_group_vertices(atlas: Atlas, names: tuple[str, ...]) -> np.ndarray:
-    parts = [atlas.get_functional_group_vertices(n) for n in names]
-    nonempty = [p for p in parts if np.size(p) > 0]
-    if not nonempty:
-        return np.array([], dtype=np.intp)
-    return np.unique(np.concatenate(nonempty))
+EMOTION_GROUPS = ("emotional",)
+SIGMOID_GAIN = 1.2
+EPS = 1e-9
 
 
 @dataclass
@@ -44,149 +28,130 @@ class ScoreReport:
     emotion_score: float
     impact_score: float
     temporal_variance: float
+    network_breakdown: list[dict[str, Any]]
     region_breakdown: list[dict[str, Any]]
     per_timestep_scores: list[dict[str, float]]
 
 
-def _sigmoid_map(z: float, k: float, center: float) -> float:
-    s = 10.0 / (1.0 + float(np.exp(-k * (z - center))))
-    return float(np.clip(s, 0.0, 10.0))
+class ActivationContext:
+    """Pre-computed region statistics shared by scoring, timeline and overlay."""
+
+    def __init__(self, predictions: np.ndarray, atlas: Atlas) -> None:
+        predictions = np.asarray(predictions, dtype=np.float64)
+        if predictions.ndim != 2:
+            raise ValueError("predictions must be 2D (n_timesteps, n_vertices)")
+        if predictions.shape[1] != atlas.n_vertices:
+            raise ValueError(
+                f"predictions have {predictions.shape[1]} vertices, atlas has {atlas.n_vertices}"
+            )
+        self.predictions = predictions
+        self.atlas = atlas
+        self.n_timesteps = predictions.shape[0]
+        self.regions = atlas.cortical_regions
+        self.region_vertices = {r: atlas.get_region_vertices(r) for r in self.regions}
+        self.group_vertices = {
+            g: atlas.get_functional_group_vertices(g) for g in FUNCTIONAL_GROUPS
+        }
+        self.cortical_idx = np.flatnonzero(atlas.cortical_mask())
+
+        self.region_series = np.stack(
+            [predictions[:, idx].mean(axis=1) for idx in self.region_vertices.values()],
+            axis=1,
+        )
+        self.region_means = self.region_series.mean(axis=0)
+        self.ref_mean = float(self.region_means.mean())
+        self.ref_std = float(self.region_means.std()) + EPS
+        self.pooled_mean = float(self.region_series.mean())
+        self.pooled_std = float(self.region_series.std()) + EPS
+        self.variance_ref_mean = float(self.region_series.var(axis=0).mean())
+        self.variance_ref_std = float(self.region_series.var(axis=0).std()) + EPS
+
+    def vertices_for(self, groups: tuple[str, ...]) -> np.ndarray:
+        parts = [self.group_vertices[g] for g in groups if self.group_vertices[g].size]
+        if not parts:
+            return np.array([], dtype=np.int64)
+        return np.unique(np.concatenate(parts))
+
+    def raw_mean(self, idx: np.ndarray) -> float:
+        if idx.size == 0:
+            return self.ref_mean
+        return float(self.predictions[:, idx].mean())
+
+    def raw_mean_at(self, t: int, idx: np.ndarray) -> float:
+        if idx.size == 0:
+            return self.pooled_mean
+        return float(self.predictions[t, idx].mean())
+
+    def score(self, raw: float) -> float:
+        return _sigmoid_score((raw - self.ref_mean) / self.ref_std)
+
+    def score_at(self, raw: float) -> float:
+        return _sigmoid_score((raw - self.pooled_mean) / self.pooled_std)
+
+    def overall_series(self) -> np.ndarray:
+        return self.predictions[:, self.cortical_idx].mean(axis=1)
+
+    def temporal_variance_score(self) -> float:
+        raw = float(np.var(self.overall_series()))
+        return _sigmoid_score((raw - self.variance_ref_mean) / self.variance_ref_std)
 
 
-def _z_of_scalar(value: float, predictions: np.ndarray) -> float:
-    mu = float(np.mean(predictions))
-    sigma = float(np.std(predictions)) + 1e-9
-    return (value - mu) / sigma
+def _sigmoid_score(z: float, gain: float = SIGMOID_GAIN) -> float:
+    return float(np.clip(10.0 / (1.0 + np.exp(-gain * z)), 0.0, 10.0))
 
 
-def _normalize_activation(
-    raw_mean: float, predictions: np.ndarray, k: float = 1.0, center: float = 0.0
-) -> float:
-    z = _z_of_scalar(raw_mean, predictions)
-    return _sigmoid_map(z, k, center)
+def compute_impact_score(attention: float, emotion: float, temporal_variance: float) -> float:
+    return float(np.clip(0.4 * attention + 0.4 * emotion + 0.2 * temporal_variance, 0.0, 10.0))
 
 
-def _normalize_temporal_variance_scalar(
-    raw_var: float, predictions: np.ndarray, k: float = 1.0, center: float = 0.0
-) -> float:
-    per_t_spread = np.var(predictions, axis=1)
-    ref = float(np.mean(per_t_spread))
-    scale = float(np.std(per_t_spread)) + 1e-9
-    z = (raw_var - ref) / scale
-    return _sigmoid_map(z, k, center)
+def compute_scores(predictions: np.ndarray, atlas: Atlas) -> ScoreReport:
+    ctx = ActivationContext(predictions, atlas)
+    return compute_scores_from_context(ctx)
 
 
-def _vertex_mean_over_time(
-    predictions: np.ndarray, vertex_indices: np.ndarray
-) -> float:
-    if vertex_indices.size == 0:
-        return 0.0
-    idx = vertex_indices.astype(np.intp, copy=False)
-    subset = predictions[:, idx]
-    return float(np.mean(subset))
+def compute_scores_from_context(ctx: ActivationContext) -> ScoreReport:
+    att_idx = ctx.vertices_for(ATTENTION_GROUPS)
+    emo_idx = ctx.vertices_for(EMOTION_GROUPS)
+    attention = ctx.score(ctx.raw_mean(att_idx))
+    emotion = ctx.score(ctx.raw_mean(emo_idx))
+    temporal_variance = ctx.temporal_variance_score()
+    impact = compute_impact_score(attention, emotion, temporal_variance)
 
-
-def _vertex_mean_at_timestep(
-    predictions: np.ndarray, t: int, vertex_indices: np.ndarray
-) -> float:
-    if vertex_indices.size == 0:
-        return 0.0
-    idx = vertex_indices.astype(np.intp, copy=False)
-    return float(np.mean(predictions[t, idx]))
-
-
-def compute_attention_score(
-    predictions: np.ndarray,
-    atlas: Atlas,
-    k: float = 1.0,
-    center: float = 0.0,
-) -> float:
-    all_idx = _combined_group_vertices(atlas, ATTENTION_GROUPS)
-    if all_idx.size == 0:
-        return 0.0
-    raw = _vertex_mean_over_time(predictions, all_idx)
-    return _normalize_activation(raw, predictions, k, center)
-
-
-def compute_emotion_score(
-    predictions: np.ndarray,
-    atlas: Atlas,
-    k: float = 1.0,
-    center: float = 0.0,
-) -> float:
-    idx = atlas.get_functional_group_vertices("emotional")
-    raw = _vertex_mean_over_time(predictions, idx)
-    return _normalize_activation(raw, predictions, k, center)
-
-
-def compute_temporal_variance(
-    predictions: np.ndarray, k: float = 1.0, center: float = 0.0
-) -> float:
-    overall_per_t = np.mean(predictions, axis=1)
-    raw = float(np.var(overall_per_t))
-    return _normalize_temporal_variance_scalar(raw, predictions, k, center)
-
-
-def compute_impact_score(
-    attention: float, emotion: float, temporal_variance: float
-) -> float:
-    v = 0.4 * attention + 0.4 * emotion + 0.2 * temporal_variance
-    return float(np.clip(v, 0.0, 10.0))
-
-
-def compute_region_breakdown(
-    predictions: np.ndarray,
-    atlas: Atlas,
-    k: float = 1.0,
-    center: float = 0.0,
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
+    network_rows = []
     for group in FUNCTIONAL_GROUPS:
-        idx = atlas.get_functional_group_vertices(group)
-        raw = _vertex_mean_over_time(predictions, idx)
-        norm = _normalize_activation(raw, predictions, k, center)
-        rows.append(
+        raw = ctx.raw_mean(ctx.group_vertices[group])
+        network_rows.append(
             {
-                "region_name": group,
-                "functional_group": group,
+                "network": group,
+                "regions": ctx.atlas.functional_groups[group],
+                "n_vertices": int(ctx.group_vertices[group].size),
                 "mean_activation": raw,
-                "normalized_score": norm,
+                "normalized_score": ctx.score(raw),
             }
         )
-    rows.sort(key=lambda r: r["mean_activation"], reverse=True)
-    return rows
+    network_rows.sort(key=lambda r: r["normalized_score"], reverse=True)
 
+    region_rows = []
+    for region, raw in zip(ctx.regions, ctx.region_means):
+        region_rows.append(
+            {
+                "region_name": region,
+                "functional_group": ctx.atlas.group_of_region(region),
+                "n_vertices": int(ctx.region_vertices[region].size),
+                "mean_activation": float(raw),
+                "normalized_score": ctx.score(float(raw)),
+            }
+        )
+    region_rows.sort(key=lambda r: r["normalized_score"], reverse=True)
 
-def compute_scores(
-    predictions: np.ndarray,
-    atlas: Atlas,
-    k: float = 1.0,
-    center: float = 0.0,
-) -> ScoreReport:
-    predictions = np.asarray(predictions, dtype=np.float64)
-    if predictions.ndim != 2:
-        raise ValueError("predictions must be 2D (n_timesteps, n_vertices)")
-
-    attention = compute_attention_score(predictions, atlas, k, center)
-    emotion = compute_emotion_score(predictions, atlas, k, center)
-    tv = compute_temporal_variance(predictions, k, center)
-    impact = compute_impact_score(attention, emotion, tv)
-    regions = compute_region_breakdown(predictions, atlas, k, center)
-
-    att_idx = _combined_group_vertices(atlas, ATTENTION_GROUPS)
-    emo_idx = atlas.get_functional_group_vertices("emotional")
-
-    per_timestep: list[dict[str, float]] = []
-    n_t = predictions.shape[0]
-    for t in range(n_t):
-        att_raw = _vertex_mean_at_timestep(predictions, t, att_idx)
-        emo_raw = _vertex_mean_at_timestep(predictions, t, emo_idx)
-        overall_raw = float(np.mean(predictions[t]))
+    per_timestep = []
+    overall = ctx.overall_series()
+    for t in range(ctx.n_timesteps):
         per_timestep.append(
             {
-                "attention": _normalize_activation(att_raw, predictions, k, center),
-                "emotion": _normalize_activation(emo_raw, predictions, k, center),
-                "overall": _normalize_activation(overall_raw, predictions, k, center),
+                "attention": ctx.score_at(ctx.raw_mean_at(t, att_idx)),
+                "emotion": ctx.score_at(ctx.raw_mean_at(t, emo_idx)),
+                "overall": ctx.score_at(float(overall[t])),
             }
         )
 
@@ -194,7 +159,8 @@ def compute_scores(
         attention_score=attention,
         emotion_score=emotion,
         impact_score=impact,
-        temporal_variance=tv,
-        region_breakdown=regions,
+        temporal_variance=temporal_variance,
+        network_breakdown=network_rows,
+        region_breakdown=region_rows,
         per_timestep_scores=per_timestep,
     )

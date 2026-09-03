@@ -5,15 +5,16 @@ from pathlib import Path
 import aiosqlite
 
 from config import settings
+from models.job import ACTIVE_STATUSES, JobStatus
 
-DB_PATH = Path(settings.DATA_DIR).resolve() / "neuro_web.db"
+
+def db_path() -> Path:
+    return Path(settings.DATA_DIR).resolve() / "neuro_web.db"
 
 
 async def init_db() -> None:
-    Path(settings.DATA_DIR).resolve().mkdir(parents=True, exist_ok=True)
-    async with aiosqlite.connect(str(DB_PATH)) as db:
-        await db.execute("PRAGMA journal_mode=WAL")
-        await db.execute("PRAGMA busy_timeout=5000")
+    db_path().parent.mkdir(parents=True, exist_ok=True)
+    async with get_db() as db:
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS jobs (
@@ -29,12 +30,11 @@ async def init_db() -> None:
             )
             """
         )
-        await db.commit()
 
 
 @asynccontextmanager
 async def get_db():
-    async with aiosqlite.connect(str(DB_PATH)) as db:
+    async with aiosqlite.connect(str(db_path())) as db:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA busy_timeout=5000")
         db.row_factory = aiosqlite.Row
@@ -43,25 +43,15 @@ async def get_db():
 
 
 async def reconcile_stale_jobs() -> None:
-    stale = (
-        "validating",
-        "capturing",
-        "analyzing",
-        "scoring",
-        "enhancing",
-        "running",
-    )
+    """Mark jobs that were mid-pipeline when the server stopped as failed."""
+    stale = [s.value for s in ACTIVE_STATUSES]
     placeholders = ",".join("?" * len(stale))
-    now = datetime.now(timezone.utc).isoformat()
     async with get_db() as db:
         await db.execute(
             f"""
             UPDATE jobs
-            SET status = 'failed',
-                error_message = 'interrupted',
-                failed_stage = status,
-                updated_at = ?
+            SET status = ?, error_message = 'Interrupted by a server restart', failed_stage = status, updated_at = ?
             WHERE status IN ({placeholders})
             """,
-            (now, *stale),
+            (JobStatus.failed.value, datetime.now(timezone.utc).isoformat(), *stale),
         )

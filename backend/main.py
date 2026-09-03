@@ -6,10 +6,15 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from api.assets import router as assets_router
+from api.chat import router as chat_router
+from api.files import router as files_router
 from api.jobs import router as jobs_router
 from api.stream import router as stream_router
 from config import settings
 from database import init_db, reconcile_stale_jobs
+from engine.atlas import load_atlas
+from engine.mesh_export import ensure_brain_mesh
 from pipeline.model_manager import GPUInfo, ModelManager
 from worker import worker_loop
 
@@ -23,82 +28,80 @@ logger = logging.getLogger(__name__)
 def _log_gpu_info() -> None:
     gpu = GPUInfo.detect()
     if not gpu.available:
-        logger.warning(
-            "No CUDA GPU detected — TRIBE v2 inference will not be available. "
-            "Install an NVIDIA GPU with 16GB+ VRAM for brain analysis."
-        )
+        logger.warning("No CUDA GPU detected; TRIBE v2 inference is unavailable on this machine")
         return
     for dev in gpu.devices:
-        status = "OK" if dev["sufficient"] else "INSUFFICIENT"
         logger.info(
-            "GPU %d: %s — %.1f GB VRAM [%s]",
+            "GPU %d: %s (%.1f GB VRAM) %s",
             dev["index"],
             dev["name"],
             dev["total_vram_gb"],
-            status,
+            "OK" if dev["sufficient"] else "below the 16 GB recommended for video+text",
         )
 
 
-async def _warm_up_model() -> None:
-    """Load TRIBE v2 model eagerly on startup (off the event loop)."""
-    mgr = ModelManager.get()
-    await asyncio.to_thread(mgr.load_model)
-    if mgr.is_loaded:
-        await asyncio.to_thread(mgr.warm_up)
-    else:
-        logger.warning(
-            "TRIBE v2 model not loaded — inference disabled. Reason: %s",
-            mgr.error or "unknown",
-        )
+async def _prepare_assets() -> None:
+    try:
+        await asyncio.to_thread(load_atlas)
+        await asyncio.to_thread(ensure_brain_mesh)
+    except Exception:
+        logger.warning("Could not prepare atlas/mesh assets at startup", exc_info=True)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     await reconcile_stale_jobs()
-
     _log_gpu_info()
-    await _warm_up_model()
+    logger.info(
+        "Inference backend: %s (modalities: %s); LLM chat: %s",
+        settings.INFERENCE_BACKEND,
+        ",".join(settings.TRIBE_MODALITIES),
+        settings.LLM_PROVIDER if settings.llm_available else "disabled",
+    )
+    await _prepare_assets()
+
+    manager = ModelManager.get()
+    await asyncio.to_thread(manager.load_model)
+    if not manager.inference_ready:
+        logger.warning("Inference disabled: %s", manager.error or "unknown reason")
 
     stop = asyncio.Event()
     task = asyncio.create_task(worker_loop(stop))
-    app.state.worker_stop = stop
-    app.state.worker_task = task
-    app.state.model_manager = ModelManager.get()
-    yield
-    stop.set()
-    task.cancel()
+    app.state.model_manager = manager
     try:
-        await task
-    except asyncio.CancelledError:
-        pass
+        yield
+    finally:
+        stop.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(title="Neuro Web API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[settings.FRONTEND_ORIGIN],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 app.include_router(jobs_router)
 app.include_router(stream_router)
+app.include_router(files_router)
+app.include_router(assets_router)
+app.include_router(chat_router)
 
 
 @app.get("/health")
-async def health():
-    mgr = ModelManager.get()
-    return mgr.health()
+async def health() -> dict:
+    return ModelManager.get().health()
 
 
 def main() -> None:
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=settings.BACKEND_PORT,
-        reload=False,
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=settings.BACKEND_PORT, reload=False)
 
 
 if __name__ == "__main__":

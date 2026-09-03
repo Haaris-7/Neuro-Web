@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -11,25 +12,20 @@ class JobStatus(str, Enum):
     capturing = "capturing"
     analyzing = "analyzing"
     scoring = "scoring"
-    enhancing = "enhancing"
     ready = "ready"
     failed = "failed"
 
 
+ACTIVE_STATUSES = (
+    JobStatus.validating,
+    JobStatus.capturing,
+    JobStatus.analyzing,
+    JobStatus.scoring,
+)
+
+
 class JobCreate(BaseModel):
     url: str
-
-
-class Job(BaseModel):
-    id: str
-    url: str
-    status: JobStatus
-    failed_stage: str | None = None
-    error_message: str | None = None
-    created_at: datetime
-    updated_at: datetime
-    capture_metadata: dict[str, Any] | None = None
-    config: dict[str, Any] | None = None
 
 
 class JobResponse(BaseModel):
@@ -42,3 +38,23 @@ class JobResponse(BaseModel):
     updated_at: datetime
     capture_metadata: dict[str, Any] | None = None
     config: dict[str, Any] | None = None
+
+
+def _parse_dt(value: str) -> datetime:
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    return datetime.fromisoformat(value)
+
+
+def job_from_row(row: Any) -> JobResponse:
+    return JobResponse(
+        id=str(row["id"]),
+        url=str(row["url"]),
+        status=JobStatus(str(row["status"])),
+        failed_stage=row["failed_stage"],
+        error_message=row["error_message"],
+        created_at=_parse_dt(str(row["created_at"])),
+        updated_at=_parse_dt(str(row["updated_at"])),
+        capture_metadata=json.loads(row["capture_metadata"]) if row["capture_metadata"] else None,
+        config=json.loads(row["config"]) if row["config"] else None,
+    )
