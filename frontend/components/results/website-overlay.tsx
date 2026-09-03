@@ -30,19 +30,21 @@ function OverlayRegion({
   scale,
   channel,
   hue,
+  hovered,
+  onHover,
 }: {
   el: ElementOverlay;
   scale: number;
   channel: Channel;
   hue: number;
+  hovered: boolean;
+  onHover: (el: ElementOverlay | null) => void;
 }) {
-  const [hovered, setHovered] = useState(false);
   const value = channelValue(el, channel);
   const alpha = 0.15 + value * 0.55;
-
   return (
     <div
-      className="absolute border transition-opacity"
+      className="absolute border transition-colors"
       style={{
         left: el.bbox.x * scale,
         top: el.bbox.y * scale,
@@ -52,22 +54,24 @@ function OverlayRegion({
         borderColor: hovered ? "rgb(34 211 238 / 0.9)" : "rgb(34 211 238 / 0.12)",
         zIndex: hovered ? 10 : 1,
       }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-    >
-      {hovered && (
-        <div className="pointer-events-none absolute -top-16 left-1/2 z-50 -translate-x-1/2 whitespace-nowrap rounded-lg border border-slate-700/80 bg-[#0a0e1a]/95 px-3 py-2 shadow-xl backdrop-blur-sm">
-          <p className="text-[10px] font-medium text-slate-300">
-            &lt;{el.tag}&gt; · visible in {el.visible_timesteps.length} timestep
-            {el.visible_timesteps.length === 1 ? "" : "s"}
-          </p>
-          <div className="mt-1 flex gap-3 font-mono text-[10px]">
-            <span className="text-slate-300">Overall {(el.intensity * 10).toFixed(1)}</span>
-            <span className="text-cyan-400">Att {(el.attention_contrib * 10).toFixed(1)}</span>
-            <span className="text-violet-400">Emo {(el.emotion_contrib * 10).toFixed(1)}</span>
-          </div>
-        </div>
-      )}
+      onMouseEnter={() => onHover(el)}
+      onMouseLeave={() => onHover(null)}
+    />
+  );
+}
+
+function HoverPanel({ el }: { el: ElementOverlay }) {
+  return (
+    <div className="pointer-events-none absolute bottom-4 left-4 z-30 rounded-lg border border-slate-700/80 bg-[#0a0e1a]/95 px-3 py-2 shadow-xl backdrop-blur-sm">
+      <p className="text-[10px] font-medium text-slate-300">
+        &lt;{el.tag}&gt; · {Math.round(el.bbox.width)}×{Math.round(el.bbox.height)} px · on screen
+        for {el.visible_timesteps.length} timestep{el.visible_timesteps.length === 1 ? "" : "s"}
+      </p>
+      <div className="mt-1 flex gap-3 font-mono text-[10px]">
+        <span className="text-slate-300">Overall {(el.intensity * 10).toFixed(1)}</span>
+        <span className="text-cyan-400">Attention {(el.attention_contrib * 10).toFixed(1)}</span>
+        <span className="text-violet-400">Emotion {(el.emotion_contrib * 10).toFixed(1)}</span>
+      </div>
     </div>
   );
 }
@@ -105,6 +109,7 @@ export function WebsiteOverlay({
   const [showDarkPatterns, setShowDarkPatterns] = useState(true);
   const [imgWidth, setImgWidth] = useState(0);
   const [imgError, setImgError] = useState(false);
+  const [hovered, setHovered] = useState<ElementOverlay | null>(null);
 
   const scale = imgWidth ? imgWidth / viewportWidth : 1;
   const hue = CHANNELS.find((c) => c.key === channel)?.hue ?? 200;
@@ -178,7 +183,15 @@ export function WebsiteOverlay({
               {imgWidth > 0 && (
                 <div className="absolute inset-0" style={{ opacity }}>
                   {overlay.map((el, i) => (
-                    <OverlayRegion key={i} el={el} scale={scale} channel={channel} hue={hue} />
+                    <OverlayRegion
+                      key={i}
+                      el={el}
+                      scale={scale}
+                      channel={channel}
+                      hue={hue}
+                      hovered={hovered === el}
+                      onHover={setHovered}
+                    />
                   ))}
                 </div>
               )}
@@ -188,6 +201,7 @@ export function WebsiteOverlay({
             </TransformComponent>
           </TransformWrapper>
         )}
+        {hovered && <HoverPanel el={hovered} />}
         <div className="pointer-events-none absolute right-4 top-4 text-[10px] text-slate-600">
           Scroll to zoom · Drag to pan
         </div>

@@ -35,6 +35,7 @@ MAX_EVIDENCE_CHARS = 220
 MAX_MATCHES_PER_TYPE = 8
 MAX_BUTTON_LABEL_CHARS = 48
 MAX_BUTTON_ROW_GAP_PX = 700
+MIN_PX_PER_CHAR = 5.0
 
 
 @dataclass(frozen=True)
@@ -172,7 +173,7 @@ def _detect_confirmshaming(text: str, controls: list[dict[str, Any]]) -> list[Da
     matches = _text_matches("confirmshaming", _CONFIRM_STRONG, text, 0.9)
     matches += _text_matches("confirmshaming", _CONFIRM_MODERATE, text, 0.6)
     for control in controls:
-        label = str(control.get("text", ""))
+        label = str(control.get("text") or control.get("aria_label") or "")
         if not label:
             continue
         if _CONFIRM_STRONG.search(label) or _CONFIRM_MODERATE.search(label):
@@ -217,15 +218,18 @@ def _area(item: dict[str, Any]) -> float:
     return max(0.0, float(item.get("width", 0.0)) * float(item.get("height", 0.0)))
 
 
+def _has_visible_label(control: dict[str, Any]) -> bool:
+    """Screen-reader-only text survives innerText; a label needs room to render."""
+    text = str(control.get("text") or "")
+    if not text or len(text) > MAX_BUTTON_LABEL_CHARS:
+        return False
+    needed_px = min(len(text) * MIN_PX_PER_CHAR, 60.0)
+    return float(control.get("width", 0.0)) >= needed_px
+
+
 def _detect_misdirection(controls: list[dict[str, Any]]) -> list[DarkPatternMatch]:
-    """Flag rows where one button dwarfs a labelled sibling (accept vs. decline)."""
-    sized = [
-        c
-        for c in controls
-        if c.get("is_button")
-        and _area(c) > 1.0
-        and 0 < len(str(c.get("text", ""))) <= MAX_BUTTON_LABEL_CHARS
-    ]
+    """Flag rows where one button dwarfs a visibly labelled sibling (accept vs. decline)."""
+    sized = [c for c in controls if c.get("is_button") and _area(c) > 1.0 and _has_visible_label(c)]
     if len(sized) < 2:
         return []
     sized.sort(key=lambda c: (float(c.get("y", 0.0)), float(c.get("x", 0.0))))

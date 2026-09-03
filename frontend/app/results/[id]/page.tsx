@@ -160,9 +160,10 @@ export default function ResultsPage() {
   useEffect(() => {
     try {
       const canvas = document.createElement("canvas");
-      const gl =
-        canvas.getContext("webgl2") || canvas.getContext("webgl");
+      const options = { failIfMajorPerformanceCaveat: true };
+      const gl = canvas.getContext("webgl2", options) || canvas.getContext("webgl", options);
       setWebglAvailable(!!gl);
+      (gl as WebGLRenderingContext | null)?.getExtension("WEBGL_lose_context")?.loseContext();
     } catch {
       setWebglAvailable(false);
     }
@@ -334,11 +335,13 @@ export default function ResultsPage() {
                     regionBreakdown={report.scores.region_breakdown}
                     timeLabels={timeLabels}
                     colormap={colormap}
+                    onUnavailable={() => setWebglAvailable(false)}
                   />
                 ) : (
                   <BrainHeatmapFallback
                     projectionPaths={report.projection_paths}
                     jobId={jobId}
+                    reason="hardware-accelerated WebGL is unavailable in this browser"
                   />
                 )}
               </div>

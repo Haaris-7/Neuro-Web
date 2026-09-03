@@ -23,6 +23,7 @@ interface BrainHeatmapProps {
   regionBreakdown: RegionBreakdown[];
   timeLabels: number[];
   colormap?: ColormapName;
+  onUnavailable?: () => void;
 }
 
 type ViewMode = "all" | FunctionalGroup;
@@ -251,6 +252,7 @@ export function BrainHeatmap({
   regionBreakdown,
   timeLabels,
   colormap = "viridis",
+  onUnavailable,
 }: BrainHeatmapProps) {
   const [mode, setMode] = useState<ViewMode>("all");
   const [frame, setFrame] = useState(0);
@@ -321,7 +323,17 @@ export function BrainHeatmap({
         <Canvas
           camera={{ fov: 40, near: 1, far: 2000, position: [0, 40, 260] }}
           dpr={[1, 2]}
-          gl={{ antialias: true, alpha: false }}
+          gl={{ antialias: true, alpha: false, powerPreference: "high-performance" }}
+          onCreated={({ gl }) => {
+            gl.domElement.addEventListener(
+              "webglcontextlost",
+              (event) => {
+                event.preventDefault();
+                onUnavailable?.();
+              },
+              { once: true },
+            );
+          }}
         >
           <color attach="background" args={["#060a14"]} />
           <hemisphereLight args={["#dbe7ff", "#0b1020", 0.9]} />

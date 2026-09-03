@@ -44,3 +44,6 @@ Thumbs.db
 
 # Cursor
 .cursor/
+
+# TRIBE v2 checkout (make setup-tribe)
+tribev2/

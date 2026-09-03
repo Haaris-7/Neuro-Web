@@ -36,9 +36,9 @@ _DOM_SNAPSHOT_JS = """
     const cs = window.getComputedStyle(el);
     return tag === "a" && cs.display !== "inline" && (parseFloat(cs.paddingLeft) >= 8 || parseFloat(cs.borderRadius) > 0);
   };
-  const controlText = (el) =>
-    (el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("title") || "")
-      .replace(/\\s+/g, " ").trim().slice(0, 200);
+  const clean = (s) => (s || "").replace(/\\s+/g, " ").trim().slice(0, 200);
+  const controlText = (el) => clean(el.innerText || el.value);
+  const controlAria = (el) => clean(el.getAttribute("aria-label") || el.getAttribute("title"));
 
   const regionTags = ["header", "nav", "main", "section", "article", "aside", "footer", "form", "button", "a", "input"];
   const regions = [];
@@ -56,6 +56,7 @@ _DOM_SNAPSHOT_JS = """
         tag,
         ...box,
         text: isControl ? controlText(el) : "",
+        aria_label: isControl ? controlAria(el) : "",
         is_control: isControl,
         is_button: isControl && isButtonLike(el, tag),
       });
