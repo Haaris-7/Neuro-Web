@@ -3,6 +3,7 @@ import json
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 from playwright.async_api import async_playwright
 
@@ -12,6 +13,7 @@ from pipeline.url_validator import request_is_allowed, validate_url
 SCROLL_STEPS_PER_SECOND = 10
 MAX_SCREENSHOT_HEIGHT_PX = 12000
 SCREENSHOT_TIMEOUT_MS = 90000
+REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 _DOM_SNAPSHOT_JS = """
 () => {
@@ -128,17 +130,6 @@ _DOM_SNAPSHOT_JS = """
 """
 
 
-def _redirect_hop_count(response) -> int:
-    if response is None:
-        return 0
-    n = 0
-    request = response.request
-    while request.redirected_from:
-        n += 1
-        request = request.redirected_from
-    return n
-
-
 def _job_paths(job_dir: Path, data_root: Path) -> dict[str, Path]:
     paths = {
         "screenshot": job_dir / "page.png",
@@ -154,12 +145,52 @@ def _job_paths(job_dir: Path, data_root: Path) -> dict[str, Path]:
     return paths
 
 
-async def _enforce_egress_policy(route) -> None:
-    """Block subresource and script-initiated requests to private or metadata networks."""
-    if await asyncio.to_thread(request_is_allowed, route.request.url):
-        await route.continue_()
-    else:
-        await route.abort("blockedbyclient")
+def _egress_policy(max_redirects: int, navigation: dict[str, str]):
+    """Build a route handler that fetches every request itself so each redirect
+    hop is policy-checked.
+
+    Playwright invokes route handlers once per request and follows redirects
+    internally, so `route.continue_()` would let an allowed host bounce the
+    browser to a private or metadata address. Fetching with redirects disabled
+    and walking the chain here closes that gap. The final URL of the top-level
+    document is recorded in ``navigation["final_url"]``.
+    """
+
+    async def enforce(route) -> None:
+        request = route.request
+        url = request.url
+        if not await asyncio.to_thread(request_is_allowed, url):
+            await route.abort("blockedbyclient")
+            return
+        method = request.method
+        body = request.post_data_buffer
+        try:
+            response = await route.fetch(max_redirects=0)
+            hops = 0
+            while response.status in REDIRECT_STATUSES:
+                location = response.headers.get("location")
+                if not location:
+                    break
+                target = urljoin(url, location)
+                hops += 1
+                if hops > max_redirects or not await asyncio.to_thread(request_is_allowed, target):
+                    await route.abort("blockedbyclient")
+                    return
+                if response.status == 303 or (
+                    response.status in (301, 302) and method not in ("GET", "HEAD")
+                ):
+                    method, body = "GET", None
+                response = await route.fetch(
+                    url=target, method=method, post_data=body, max_redirects=0
+                )
+                url = target
+            if request.is_navigation_request() and request.frame.parent_frame is None:
+                navigation["final_url"] = url
+            await route.fulfill(response=response)
+        except Exception:
+            await route.abort("failed")
+
+    return enforce
 
 
 async def _write_json(path: Path, payload: Any) -> None:
@@ -185,7 +216,7 @@ async def capture_website(job_id: str, url: str, config: dict[str, Any]) -> dict
     max_video_bytes = int(config["max_video_size_mb"]) * 1024 * 1024
     paths = _job_paths(job_dir, data_root)
 
-    final_url = url
+    navigation = {"final_url": url}
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         try:
@@ -197,15 +228,14 @@ async def capture_website(job_id: str, url: str, config: dict[str, Any]) -> dict
             )
             context.set_default_timeout(default_timeout_ms)
             context.set_default_navigation_timeout(nav_timeout_ms)
-            await context.route("**/*", _enforce_egress_policy)
+            await context.route("**/*", _egress_policy(max_redirects, navigation))
             try:
                 recording_started = time.perf_counter()
                 page = await context.new_page()
                 response = await page.goto(url, wait_until="load", timeout=nav_timeout_ms)
-                if _redirect_hop_count(response) > max_redirects:
-                    raise ValueError("Exceeded maximum redirects")
-                final_url = page.url
-                await asyncio.to_thread(validate_url, final_url)
+                if response is None or response.status >= 400:
+                    status = response.status if response else "no response"
+                    raise ValueError(f"Page could not be loaded ({status})")
 
                 scroll_height = float(
                     await page.evaluate(
@@ -302,7 +332,7 @@ async def capture_website(job_id: str, url: str, config: dict[str, Any]) -> dict
         "text": str(paths["text"]),
         "dom": str(paths["dom"]),
         "scroll_timeline": str(paths["scroll_timeline"]),
-        "final_url": final_url,
+        "final_url": navigation["final_url"],
         "viewport_w": viewport_w,
         "viewport_h": viewport_h,
         "page_height": dom.get("page_height"),

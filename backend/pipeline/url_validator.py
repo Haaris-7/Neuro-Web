@@ -1,6 +1,7 @@
 import ipaddress
 import socket
-from functools import lru_cache
+import threading
+import time
 from urllib.parse import urlparse, urlunparse
 
 from config import settings
@@ -8,6 +9,14 @@ from config import settings
 # Schemes Chromium may request that never leave the browser process.
 _INTERNAL_SCHEMES = {"data", "blob", "about", "chrome", "chrome-extension", "devtools"}
 _BLOCKED_HOSTNAMES = {"localhost", "metadata.google.internal", "metadata"}
+
+# Short-lived cache so a page's burst of requests to one host resolves once,
+# while forcing re-resolution often enough that a DNS rebind cannot ride a
+# stale allow decision through a whole capture.
+_DNS_TTL_S = 5.0
+_DNS_CACHE_MAX = 4096
+_dns_cache: dict[str, tuple[float, bool]] = {}
+_dns_lock = threading.Lock()
 
 
 def _blocked_ip(addr: ipaddress._BaseAddress) -> bool:
@@ -23,12 +32,7 @@ def _blocked_ip(addr: ipaddress._BaseAddress) -> bool:
     )
 
 
-@lru_cache(maxsize=4096)
-def host_is_allowed(hostname: str) -> bool:
-    """Resolve a hostname and reject any address on a non-public network."""
-    host = hostname.strip("[]").lower()
-    if not host or host in _BLOCKED_HOSTNAMES or host.endswith(".localhost"):
-        return False
+def _resolve_allowed(host: str) -> bool:
     try:
         infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
     except socket.gaierror:
@@ -43,6 +47,24 @@ def host_is_allowed(hostname: str) -> bool:
         if _blocked_ip(ip):
             return False
     return True
+
+
+def host_is_allowed(hostname: str) -> bool:
+    """Resolve a hostname and reject any address on a non-public network."""
+    host = hostname.strip("[]").lower()
+    if not host or host in _BLOCKED_HOSTNAMES or host.endswith(".localhost"):
+        return False
+    now = time.monotonic()
+    with _dns_lock:
+        cached = _dns_cache.get(host)
+        if cached is not None and now - cached[0] < _DNS_TTL_S:
+            return cached[1]
+    allowed = _resolve_allowed(host)
+    with _dns_lock:
+        if len(_dns_cache) >= _DNS_CACHE_MAX:
+            _dns_cache.clear()
+        _dns_cache[host] = (now, allowed)
+    return allowed
 
 
 def request_is_allowed(url: str) -> bool:
