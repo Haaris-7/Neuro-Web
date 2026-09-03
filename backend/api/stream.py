@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
 from database import get_db
-from models.job import JobStatus, job_from_row
+from models.job import JobId, JobStatus, job_from_row
 
 router = APIRouter(prefix="/jobs", tags=["stream"])
 
@@ -19,7 +19,7 @@ async def _fetch_job_row(job_id: str):
 
 
 @router.get("/{job_id}/stream")
-async def stream_job(job_id: str, request: Request) -> EventSourceResponse:
+async def stream_job(job_id: JobId, request: Request) -> EventSourceResponse:
     if not await _fetch_job_row(job_id):
         raise HTTPException(status_code=404, detail="Job not found")
     last_raw = request.headers.get("last-event-id", "")

@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
 from config import settings
+from models.job import JobId
 
 router = APIRouter(prefix="/jobs", tags=["files"])
 
@@ -28,11 +29,7 @@ def resolve_artifact(job_id: str, relative_path: str) -> Path:
         raise HTTPException(status_code=404, detail="File not found")
     data_root = Path(settings.DATA_DIR).resolve()
     for subdir in _ARTIFACT_DIRS:
-        job_dir = (data_root / subdir / job_id).resolve()
-        try:
-            job_dir.relative_to(data_root / subdir)
-        except ValueError:
-            continue
+        job_dir = data_root / subdir / job_id
         candidate = (job_dir / relative_path).resolve()
         try:
             candidate.relative_to(job_dir)
@@ -44,7 +41,7 @@ def resolve_artifact(job_id: str, relative_path: str) -> Path:
 
 
 @router.get("/{job_id}/files/{relative_path:path}")
-async def get_job_file(job_id: str, relative_path: str) -> FileResponse:
+async def get_job_file(job_id: JobId, relative_path: str) -> FileResponse:
     path = resolve_artifact(job_id, relative_path)
     return FileResponse(
         str(path),

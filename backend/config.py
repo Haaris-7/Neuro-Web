@@ -64,8 +64,16 @@ class Settings:
         return _env_int("MAX_URL_LENGTH", 2048)
 
     @property
+    def BACKEND_HOST(self) -> str:
+        return _env_str("BACKEND_HOST", "127.0.0.1")
+
+    @property
     def BACKEND_PORT(self) -> int:
         return _env_int("BACKEND_PORT", 8000)
+
+    @property
+    def CHAT_RATE_LIMIT_PER_MINUTE(self) -> int:
+        return _env_int("CHAT_RATE_LIMIT_PER_MINUTE", 20)
 
     @property
     def FRONTEND_ORIGIN(self) -> str:

@@ -17,6 +17,7 @@ MAX_REGIONS = 400
 class ElementOverlay:
     tag: str
     bbox: dict[str, float]
+    fixed: bool
     intensity: float
     attention_contrib: float
     emotion_contrib: float
@@ -32,7 +33,9 @@ def _bbox(region: dict[str, Any]) -> dict[str, float]:
     }
 
 
-def _visible(bbox: dict[str, float], top: float, bottom: float) -> bool:
+def _visible(bbox: dict[str, float], fixed: bool, top: float, bottom: float) -> bool:
+    if fixed:
+        return True
     return bbox["y"] < bottom and bbox["y"] + bbox["height"] > top
 
 
@@ -63,7 +66,15 @@ def build_overlay(
     }
 
     accum: list[dict[str, Any]] = [
-        {"tag": str(r.get("tag", "")), "bbox": _bbox(r), "overall": [], "att": [], "emo": [], "t": []}
+        {
+            "tag": str(r.get("tag", "")),
+            "bbox": _bbox(r),
+            "fixed": bool(r.get("fixed", False)),
+            "overall": [],
+            "att": [],
+            "emo": [],
+            "t": [],
+        }
         for r in regions
     ]
     for t in range(ctx.n_timesteps):
@@ -73,7 +84,7 @@ def build_overlay(
         att_i = ctx.score_at(ctx.raw_mean_at(t, att_idx)) / 10.0
         emo_i = ctx.score_at(ctx.raw_mean_at(t, emo_idx)) / 10.0
         for entry in accum:
-            if _visible(entry["bbox"], top, bottom):
+            if _visible(entry["bbox"], entry["fixed"], top, bottom):
                 entry["overall"].append(overall_i)
                 entry["att"].append(att_i)
                 entry["emo"].append(emo_i)
@@ -83,6 +94,7 @@ def build_overlay(
         ElementOverlay(
             tag=e["tag"],
             bbox=e["bbox"],
+            fixed=e["fixed"],
             intensity=float(np.mean(e["overall"])),
             attention_contrib=float(np.mean(e["att"])),
             emotion_contrib=float(np.mean(e["emo"])),

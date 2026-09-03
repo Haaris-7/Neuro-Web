@@ -64,8 +64,10 @@ function HoverPanel({ el }: { el: ElementOverlay }) {
   return (
     <div className="pointer-events-none absolute bottom-4 left-4 z-30 rounded-lg border border-slate-700/80 bg-[#0a0e1a]/95 px-3 py-2 shadow-xl backdrop-blur-sm">
       <p className="text-[10px] font-medium text-slate-300">
-        &lt;{el.tag}&gt; · {Math.round(el.bbox.width)}×{Math.round(el.bbox.height)} px · on screen
-        for {el.visible_timesteps.length} timestep{el.visible_timesteps.length === 1 ? "" : "s"}
+        &lt;{el.tag}&gt; · {Math.round(el.bbox.width)}×{Math.round(el.bbox.height)} px ·{" "}
+        {el.fixed
+          ? "fixed, always on screen"
+          : `on screen for ${el.visible_timesteps.length} timestep${el.visible_timesteps.length === 1 ? "" : "s"}`}
       </p>
       <div className="mt-1 flex gap-3 font-mono text-[10px]">
         <span className="text-slate-300">Overall {(el.intensity * 10).toFixed(1)}</span>

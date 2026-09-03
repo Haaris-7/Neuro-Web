@@ -48,7 +48,7 @@ run:
 	$(MAKE) run-backend & $(MAKE) run-frontend & wait
 
 run-backend:
-	cd backend && ../$(PY) -m uvicorn main:app --host 0.0.0.0 --port 8000
+	cd backend && ../$(PY) main.py
 
 run-frontend:
 	cd frontend && npm run dev
