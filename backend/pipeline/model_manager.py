@@ -62,6 +62,7 @@ class ModelManager:
     def __init__(self) -> None:
         self._model: Any = None
         self._loaded = False
+        self._loading = False
         self._load_time_s = 0.0
         self._gpu_info: GPUInfo | None = None
         self._error: str | None = None
@@ -93,6 +94,10 @@ class ModelManager:
         return self._error
 
     @property
+    def is_loading(self) -> bool:
+        return self._loading
+
+    @property
     def inference_ready(self) -> bool:
         return settings.INFERENCE_BACKEND == "mock" or self._loaded
 
@@ -103,6 +108,7 @@ class ModelManager:
             "modalities": list(settings.TRIBE_MODALITIES),
             "inference_ready": self.inference_ready,
             "model_loaded": self._loaded,
+            "model_loading": self._loading,
             "load_time_s": round(self._load_time_s, 2),
             "gpu_available": gpu.available,
             "gpu_count": gpu.device_count,
@@ -152,6 +158,7 @@ class ModelManager:
         cache_dir = Path(settings.MODEL_CACHE_DIR) / "tribe"
         cache_dir.mkdir(parents=True, exist_ok=True)
         logger.info("Loading TRIBE v2 (%s); first run downloads weights", settings.TRIBE_MODEL_ID)
+        self._loading = True
         t0 = time.monotonic()
         try:
             self._model = TribeModel.from_pretrained(
@@ -167,3 +174,5 @@ class ModelManager:
             self._load_time_s = time.monotonic() - t0
             self._error = f"Failed to load TRIBE v2: {exc}"
             logger.exception(self._error)
+        finally:
+            self._loading = False

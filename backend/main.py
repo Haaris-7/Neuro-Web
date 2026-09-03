@@ -62,22 +62,23 @@ async def lifespan(app: FastAPI):
     await _prepare_assets()
 
     manager = ModelManager.get()
-    await asyncio.to_thread(manager.load_model)
-    if not manager.inference_ready:
-        logger.warning("Inference disabled: %s", manager.error or "unknown reason")
-
+    model_ready = asyncio.create_task(_load_model(manager))
     stop = asyncio.Event()
-    task = asyncio.create_task(worker_loop(stop))
+    worker = asyncio.create_task(worker_loop(stop, model_ready))
     app.state.model_manager = manager
     try:
         yield
     finally:
         stop.set()
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        for task in (worker, model_ready):
+            task.cancel()
+        await asyncio.gather(worker, model_ready, return_exceptions=True)
+
+
+async def _load_model(manager: ModelManager) -> None:
+    await asyncio.to_thread(manager.load_model)
+    if not manager.inference_ready:
+        logger.warning("Inference disabled: %s", manager.error or "unknown reason")
 
 
 app = FastAPI(title="Neuro Web API", lifespan=lifespan)

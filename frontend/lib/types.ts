@@ -195,6 +195,7 @@ export interface HealthResponse {
   modalities: string[];
   inference_ready: boolean;
   model_loaded: boolean;
+  model_loading: boolean;
   gpu_available: boolean;
   llm_available: boolean;
   llm_provider: string | null;

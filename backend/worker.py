@@ -180,7 +180,8 @@ async def _process_job(job_id: str, url: str) -> None:
         )
 
 
-async def worker_loop(stop: asyncio.Event) -> None:
+async def worker_loop(stop: asyncio.Event, model_ready: asyncio.Future | None = None) -> None:
+    """Process queued jobs one at a time; waits for model loading before the first job."""
     while not stop.is_set():
         job = await _fetch_next_queued()
         if job is None:
@@ -189,4 +190,7 @@ async def worker_loop(stop: asyncio.Event) -> None:
             except asyncio.TimeoutError:
                 pass
             continue
+        if model_ready is not None and not model_ready.done():
+            logger.info("Job %s queued until the model finishes loading", job[0])
+            await asyncio.wait({model_ready})
         await _process_job(*job)
