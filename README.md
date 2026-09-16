@@ -6,6 +6,12 @@ Neuro Web records a page as it scrolls, runs Meta's [TRIBE v2](https://github.co
 
 Paste a public `http(s)` URL. The app does the rest.
 
+## Demo
+
+<video src="https://github.com/Haaris-7/Neuro-Web/raw/main/docs/brag.mp4" poster="docs/brag.jpg" controls muted playsinline width="100%"></video>
+
+A URL goes in; the pipeline captures the page, runs TRIBE v2 locally, and returns a thresholded cortical map, 0–10 scores, and the dark patterns it caught. ([watch the demo](docs/brag.mp4) if the player above does not load.)
+
 ## What Neuro Web does
 
 Neuro Web is a local analysis workbench for attention, emotion, and manipulative design. You submit a URL; a background worker captures the page, predicts fMRI-like activity on the cortical surface, and compiles a report the dashboard can explore.
