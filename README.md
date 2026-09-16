@@ -8,9 +8,11 @@ Paste a public `http(s)` URL. The app does the rest.
 
 ## Demo
 
-<video src="https://github.com/Haaris-7/Neuro-Web/raw/main/docs/brag.mp4" poster="docs/brag.jpg" controls muted playsinline width="100%"></video>
+[![Neuro Web — predicted cortical response, scores, and dark-pattern report](docs/brag.jpg)](https://github.com/Haaris-7/Neuro-Web/raw/main/docs/brag.mp4)
 
-A URL goes in; the pipeline captures the page, runs TRIBE v2 locally, and returns a thresholded cortical map, 0–10 scores, and the dark patterns it caught. ([watch the demo](docs/brag.mp4) if the player above does not load.)
+**[▶ Watch the 23-second demo](https://github.com/Haaris-7/Neuro-Web/raw/main/docs/brag.mp4)**
+
+A URL goes in; the pipeline captures the page, runs TRIBE v2 locally, and returns a thresholded cortical map, 0–10 scores, and the dark patterns it caught.
 
 ## What Neuro Web does
 
