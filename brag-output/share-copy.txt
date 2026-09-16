@@ -1,0 +1,3 @@
+Introducing Neuro Web: see how websites affect your brain.
+
+Paste a URL and it records the page scrolling, runs Meta's TRIBE v2 brain-encoding model on your own GPU, and turns the predicted cortical response into attention and emotion scores, a 3D heatmap, and a dark-pattern report. No cloud, no upload — the whole pipeline runs locally.
